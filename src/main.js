@@ -28,6 +28,14 @@ const state = {
   vpbuddyMessages: [],
   fileUploadContext: "material",
   knowledgeCallable: {},
+  knowledgeSearch: "",
+  settings: {
+    apiKey: "",
+    model: "GPT-4.1",
+    endpoint: "https://api.openai.com/v1",
+    status: "idle",
+    message: "尚未测试连接"
+  },
   apiStatus: "idle",
   apiMessage: "演示数据",
   zoom: 100,
@@ -121,7 +129,7 @@ const timeline = [
   { time: "10:05", title: "上传材料", desc: "上传了 6 个会议材料" },
   { time: "10:10", title: "AI 提问", desc: "提出了 3 个关键问题" },
   { time: "10:16", title: "解释材料", desc: "AI 生成材料摘要" },
-  { time: "10:20", title: "发送给客户", desc: "发送 2 个问题和 1 个材料" }
+  { time: "10:20", title: "确认待办", desc: "沉淀 2 个问题和 1 个材料" }
 ];
 
 const meetingRecords = [
@@ -380,16 +388,43 @@ function pushVpbuddyMessage(text, type = "question") {
 }
 
 function getKnowledgeDocsForCurrentTab() {
-  return knowledgeDocs.filter((item) => item.scope === state.knowledgeTab);
+  const query = state.knowledgeSearch.trim().toLowerCase();
+  return knowledgeDocs.filter((item) => {
+    if (item.scope !== state.knowledgeTab) return false;
+    if (!query) return true;
+    const haystack = [item.name, item.type, item.size, item.updated, item.source, item.visible, ...item.tags].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
 }
 
 function getSelectedKnowledgeDoc() {
   const visibleDocs = getKnowledgeDocsForCurrentTab();
-  return visibleDocs.find((item) => item.id === state.selectedKnowledge) || visibleDocs[0] || knowledgeDocs[0];
+  return visibleDocs.find((item) => item.id === state.selectedKnowledge) || visibleDocs[0] || null;
 }
 
 function isKnowledgeCallable(doc) {
+  if (!doc) return false;
   return state.knowledgeCallable[doc.id] !== false;
+}
+
+function upsertMeeting(meeting) {
+  const index = meetings.findIndex((item) => item.id === meeting.id);
+  if (index >= 0) meetings[index] = { ...meetings[index], ...meeting };
+  else meetings.unshift(meeting);
+}
+
+function createLocalMeeting(input) {
+  const title = input.title.trim();
+  const projectName = input.projectName?.trim();
+  return {
+    id: `local-${Date.now()}`,
+    title,
+    desc: projectName ? `${projectName} · 本地会议` : "本地会议",
+    time: `今天 ${nowTime()} 开始`,
+    status: "进行中",
+    cover: "assets/meeting-city.png",
+    localOnly: true
+  };
 }
 
 function replaceArray(target, next) {
@@ -631,6 +666,190 @@ async function sendVpbuddyChatMessage(text) {
   render();
 }
 
+function getSettingsPayload() {
+  return {
+    apiKey: state.settings.apiKey.trim(),
+    model: state.settings.model,
+    endpoint: state.settings.endpoint.trim()
+  };
+}
+
+function updateSettingsFromInputs() {
+  const apiKey = document.querySelector(".settings-api-key")?.value ?? state.settings.apiKey;
+  const model = document.querySelector(".settings-model")?.value ?? state.settings.model;
+  const endpoint = document.querySelector(".settings-endpoint")?.value ?? state.settings.endpoint;
+  state.settings = { ...state.settings, apiKey, model, endpoint };
+}
+
+async function testAISettings() {
+  updateSettingsFromInputs();
+  state.settings.status = "testing";
+  state.settings.message = "正在调用后端测试接口";
+  render();
+  try {
+    await api.testAIConnection(getSettingsPayload());
+    state.settings.status = "connected";
+    state.settings.message = "后端测试接口返回成功";
+    setApiStatus("connected", "已连接后端");
+    setToast("AI 连接测试通过");
+  } catch (error) {
+    state.settings.status = "error";
+    state.settings.message = `后端测试接口调用失败：${error.message}`;
+    setApiStatus("mock", "后端设置接口未接通");
+    setToast("AI 连接测试失败，后端接口未接通");
+  }
+  render();
+}
+
+async function saveAISettings() {
+  updateSettingsFromInputs();
+  state.settings.status = "saving";
+  state.settings.message = "正在调用后端保存接口";
+  render();
+  try {
+    await api.saveAISettings(getSettingsPayload());
+    state.settings.status = "connected";
+    state.settings.message = "AI 配置已由后端保存";
+    setApiStatus("connected", "已连接后端");
+    setToast("AI 设置已保存到后端");
+  } catch (error) {
+    state.settings.status = "error";
+    state.settings.message = `后端保存接口调用失败：${error.message}`;
+    setApiStatus("mock", "后端设置接口未接通");
+    setToast("AI 设置保存失败，后端接口未接通");
+  }
+  render();
+}
+
+async function startNewMeetingFromForm() {
+  const title = document.querySelector("[data-field='meeting-title']")?.value.trim() || "";
+  const projectName = document.querySelector("[data-field='meeting-project']")?.value.trim() || "";
+  if (!title) {
+    setToast("请输入会议名称", false);
+    render();
+    return;
+  }
+
+  const input = { title, name: title, projectName, project_name: projectName };
+  let meeting = null;
+  let connected = false;
+
+  try {
+    const payload = await api.createMeeting(input);
+    meeting = normalizeMeeting(payload?.meeting || payload, 0);
+    meeting = { ...meeting, title, desc: projectName || "后端已创建的实时会议" };
+    connected = true;
+  } catch {
+    meeting = createLocalMeeting(input);
+  }
+
+  upsertMeeting(meeting);
+  state.selectedMeetingId = meeting.id;
+  state.showCreate = false;
+  state.view = "meeting";
+  state.stageTab = "presentation";
+  state.meetingLeftTab = "materials";
+  setApiStatus(connected ? "connected" : "mock", connected ? "新会议已由后端创建" : "后端未连接，新会议已在本地开启");
+  render();
+  startMeetingEvents(meeting.id);
+
+  if (connected) await loadMeetingDetailFromBackend(meeting.id);
+}
+
+async function presentMaterial(materialId) {
+  const material = materials.find((item) => item.id === materialId);
+  if (!material) return;
+  state.selectedMaterial = material.id;
+  state.stageTab = "presentation";
+  try {
+    await api.openInStage(state.selectedMeetingId, {
+      materialId: material.id,
+      name: material.name,
+      type: material.type,
+      version: material.version,
+      page: state.currentSlide
+    });
+    setApiStatus("connected", "已连接后端");
+    setToast(`${material.name} 已投屏`);
+  } catch {
+    setToast(`${material.name} 已在本地投屏，后端投屏状态接口未接通`);
+  }
+  render();
+}
+
+async function toggleStageFullscreen() {
+  const target = document.querySelector(".center-card");
+  if (!target || !document.fullscreenEnabled) {
+    setToast("当前环境不支持全屏展示");
+    render();
+    return;
+  }
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      setToast("已退出全屏");
+      render();
+    } else {
+      await target.requestFullscreen();
+      state.toast = "已进入全屏";
+    }
+  } catch (error) {
+    setToast(`全屏失败：${error.message}`);
+    render();
+  }
+}
+
+function getKnowledgeDocById(id) {
+  return knowledgeDocs.find((item) => item.id === id) || getSelectedKnowledgeDoc();
+}
+
+function saveKnowledgeRename(id) {
+  const doc = getKnowledgeDocById(id);
+  const name = document.querySelector(".knowledge-rename-input")?.value.trim();
+  if (!doc || !name) {
+    setToast("请输入新的文档名称", false);
+    render();
+    return;
+  }
+  doc.name = name;
+  setToast("文档名称已更新", false);
+  render();
+}
+
+function saveKnowledgeVisibility(id) {
+  const doc = getKnowledgeDocById(id);
+  const visible = document.querySelector(".knowledge-visibility-select")?.value;
+  if (!doc || !visible) return;
+  doc.visible = visible;
+  setToast("可见范围已更新", false);
+  render();
+}
+
+function downloadKnowledgeSource(id) {
+  const doc = getKnowledgeDocById(id);
+  if (!doc) return;
+  const snippets = knowledgePreviewSnippets[doc.id] || [];
+  const content = [
+    doc.name,
+    `类型：${doc.type.toUpperCase()}`,
+    `来源：${doc.source}`,
+    `可见范围：${doc.visible}`,
+    "",
+    ...snippets
+  ].join("\n");
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${doc.name.replace(/\.[^.]+$/, "")}-source.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setToast("源文件内容已下载", false);
+  render();
+}
+
 function renderLogin() {
   return `
     <main class="login-page">
@@ -743,8 +962,8 @@ function renderCreateModal() {
         <button class="modal-close" data-action="close-create">${icon("close")}</button>
         <div class="modal-main">
           <h2>快速新建会议</h2>
-          <label>会议名称 <strong>*</strong><input maxlength="50" placeholder="请输入会议名称" /></label>
-          <label>项目/客户（可选）<input maxlength="50" placeholder="请输入项目或客户名称（可选）" /></label>
+          <label>会议名称 <strong>*</strong><input data-field="meeting-title" maxlength="50" placeholder="请输入会议名称" /></label>
+          <label>项目/客户（可选）<input data-field="meeting-project" maxlength="50" placeholder="请输入项目或客户名称（可选）" /></label>
         </div>
         <div class="device-box">
           <div class="device-item">${icon("mic", 34)}<span><strong>麦克风</strong><em>正常</em></span></div>
@@ -837,10 +1056,9 @@ function renderMaterialsList() {
     <button class="primary wide upload-button" data-action="open-upload" data-context="material">${icon("upload")}上传材料</button>
     <div class="material-stack">
       ${materials.map((item, index) => `
-        <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${item.id}">
+        <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${item.id}" title="单击选中，双击投屏">
           ${docBadge(item.type)}
           <span><strong>${item.name}</strong><em>${item.size}</em></span>
-          <i class="more">⋮</i>
         </button>
       `).join("")}
     </div>
@@ -941,14 +1159,16 @@ function renderPresentationCanvas() {
         <button title="下一页" data-action="slide-step" data-step="1">${icon("arrowRight")}</button>
       </div>
       <div class="zoom-control"><button data-action="zoom" data-step="-10">-</button><strong>${state.zoom}%</strong><button data-action="zoom" data-step="10">+</button></div>
-      <button class="fullscreen-corners" data-action="modal" data-modal="fullscreen">⛶</button>
+      <button class="fullscreen-corners" data-action="toggle-fullscreen" title="全屏展示" aria-label="全屏展示">⛶</button>
     </div>
     <div class="slide-frame annotation-canvas tool-${state.activeTool}">
-      <img src="${assets.slide}" alt="ESG碳管理系统解决方案演示页" />
-      <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
-      <div class="annotation-text-layer">
-        ${annotations.textNotes}
-        ${state.textDraft ? `<input class="annotation-text-input" value="${escapeHtml(state.textDraft.value)}" style="left:${state.textDraft.x}%;top:${state.textDraft.y}%" placeholder="输入批注" />` : ""}
+      <div class="stage-zoom-layer" style="--stage-zoom:${state.zoom / 100}">
+        <img src="${assets.slide}" alt="ESG碳管理系统解决方案演示页" />
+        <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
+        <div class="annotation-text-layer">
+          ${annotations.textNotes}
+          ${state.textDraft ? `<input class="annotation-text-input" value="${escapeHtml(state.textDraft.value)}" style="left:${state.textDraft.x}%;top:${state.textDraft.y}%" placeholder="输入批注" />` : ""}
+        </div>
       </div>
       <button class="stage-capture-button" data-action="capture-screenshot" title="截屏上传" aria-label="截屏上传">
         ${icon("camera", 30)}
@@ -980,7 +1200,7 @@ function renderDeliverableCanvas() {
           <span>${current.version}</span>
         </header>
         <div class="deliverable-evidence">
-          <article><strong>来源会议片段</strong><p>10:10 会议问答、10:16 AI 解释材料、10:20 发送给客户。</p></article>
+          <article><strong>来源会议片段</strong><p>10:10 会议问答、10:16 AI 解释材料、10:20 待办确认。</p></article>
           <article><strong>关联材料</strong><p>ESG碳管理系统方案.pptx、需求调研清单.docx、系统功能清单.xlsx。</p></article>
           <article><strong>处理状态</strong><p>${current.status}，等待 VP 确认后进入会后归档。</p></article>
         </div>
@@ -1057,7 +1277,7 @@ function renderAIPanel() {
         <button class="link-more" data-action="modal" data-modal="all-followups">查看全部 AI 反问 ${icon("arrowRight", 16)}</button>
       </section>
       <section class="explain-box">
-        <div class="box-title">${icon("file")}<strong>解释材料</strong><button data-action="toast" data-message="解释材料列表已复制">${icon("copy", 16)}复制</button></div>
+        <div class="box-title">${icon("file")}<strong>解释材料</strong></div>
         <div class="explanation-list">
           ${explanationFindings.map((item) => `
             <button class="explanation-row ${state.selectedExplanation === item.id ? "active" : ""}" data-action="open-explanation" data-id="${item.id}">
@@ -1157,7 +1377,7 @@ function renderSummary() {
 function renderKnowledge() {
   const visibleDocs = getKnowledgeDocsForCurrentTab();
   const selected = getSelectedKnowledgeDoc();
-  const callable = isKnowledgeCallable(selected);
+  const callable = selected ? isKnowledgeCallable(selected) : false;
   const body = `
     <header class="page-header knowledge-head">
       <h1>知识库</h1>
@@ -1172,18 +1392,21 @@ function renderKnowledge() {
     <section class="knowledge-layout">
       <div class="knowledge-main">
         <div class="kb-toolbar">
-          <label class="field search-field"><input placeholder="搜索文档名称或关键词" />${icon("search")}</label>
+          <label class="field search-field"><input class="knowledge-search-input" value="${escapeHtml(state.knowledgeSearch)}" placeholder="搜索文档名称或关键词" />${icon("search")}</label>
           <button class="primary" data-action="open-upload" data-context="knowledge">${icon("upload")}上传文档</button>
         </div>
         <div class="kb-table panel">
           <div class="kb-row kb-head"><span>名称</span><span>类型</span><span>更新时间</span><span>状态</span></div>
-          ${visibleDocs.map((doc) => `<button class="kb-row ${doc.id === selected.id ? "active" : ""}" data-action="knowledge-select" data-id="${doc.id}">
-            <span>${docBadge(doc.type)}${doc.name}</span><span>${doc.type.toUpperCase()}</span><span>${doc.updated}</span><span><i class="status-dot"></i>可用</span>
-          </button>`).join("")}
+          ${visibleDocs.length ? visibleDocs.map((doc) => {
+            const docCallable = isKnowledgeCallable(doc);
+            return `<button class="kb-row ${doc.id === selected?.id ? "active" : ""}" data-action="knowledge-select" data-id="${doc.id}">
+              <span>${docBadge(doc.type)}${doc.name}</span><span>${doc.type.toUpperCase()}</span><span>${doc.updated}</span><span><i class="status-dot ${docCallable ? "on" : "off"}"></i>${docCallable ? "本次会议可调用" : "可用未调用"}</span>
+            </button>`;
+          }).join("") : `<div class="kb-empty">没有匹配的知识文档</div>`}
           <footer>共 ${visibleDocs.length} 条 <button data-action="toast" data-message="已经是第一页">‹</button><button data-action="toast" data-message="当前第 1 页">1</button><button data-action="toast" data-message="没有更多页">›</button></footer>
         </div>
       </div>
-      <aside class="knowledge-detail panel">
+      ${selected ? `<aside class="knowledge-detail panel">
         <header>${docBadge(selected.type)}<div><h2>${selected.name}</h2><p>${selected.type.toUpperCase()} · ${selected.size}</p></div></header>
         <h3>标签</h3>
         <div class="tag-list">${selected.tags.map((tag) => `<button data-action="toast" data-message="已按 ${tag} 筛选">${tag}</button>`).join("")}<button data-action="modal" data-modal="add-tag">${icon("plus", 15)}添加标签</button></div>
@@ -1201,24 +1424,34 @@ function renderKnowledge() {
           <button class="ghost" data-action="modal" data-modal="knowledge-preview" data-id="${selected.id}">${icon("monitor")}预览</button>
           <button class="primary" data-action="modal" data-modal="knowledge-more" data-id="${selected.id}">更多操作</button>
         </footer>
-      </aside>
+      </aside>` : `<aside class="knowledge-detail panel empty-detail"><h2>未选择文档</h2><p>调整搜索关键词或切换知识库范围后查看详情。</p></aside>`}
     </section>
   `;
   return renderShell(body);
 }
 
 function renderSettings() {
+  const statusClass = state.settings.status === "connected" ? "on" : state.settings.status === "error" ? "off" : "pending";
+  const statusText = {
+    connected: "已连接",
+    error: "连接失败",
+    testing: "测试中",
+    saving: "保存中",
+    idle: "未测试"
+  }[state.settings.status] || "未测试";
   const body = `
     <header class="page-header"><h1>设置</h1></header>
     <section class="settings-card panel">
       <header>${icon("sparkle", 34)}<div><h2>AI 配置</h2><p>配置 AI 模型与接口，驱动智能问答与内容生成</p></div></header>
-      <label>API Key <strong>*</strong><textarea placeholder="请输入您的 API Key"></textarea></label>
-      <label>AI 模型 <strong>*</strong><select><option>GPT-4.1</option><option>GPT-4o</option><option>o3</option></select></label>
-      <label>接口地址（可选）<input placeholder="https://api.openai.com/v1" /></label>
+      <label>API Key <strong>*</strong><textarea class="settings-api-key" placeholder="请输入您的 API Key">${escapeHtml(state.settings.apiKey)}</textarea></label>
+      <label>AI 模型 <strong>*</strong><select class="settings-model">
+        ${["GPT-4.1", "GPT-4o", "o3"].map((model) => `<option ${state.settings.model === model ? "selected" : ""}>${model}</option>`).join("")}
+      </select></label>
+      <label>接口地址（可选）<input class="settings-endpoint" value="${escapeHtml(state.settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label>
       <footer>
-        <div><i class="status-dot"></i><strong>已连接</strong><p>连接正常，可正常使用 AI 服务</p></div>
-        <button class="ghost" data-action="toast" data-message="连接测试通过，延迟 86ms">${icon("refresh")}测试连接</button>
-        <button class="primary" data-action="toast" data-message="AI 设置已保存">${icon("file")}保存设置</button>
+        <div><i class="status-dot ${statusClass}"></i><strong>${statusText}</strong><p>${state.settings.message}</p></div>
+        <button class="ghost" data-action="test-ai-settings">${icon("refresh")}测试连接</button>
+        <button class="primary" data-action="save-ai-settings">${icon("file")}保存设置</button>
       </footer>
     </section>
   `;
@@ -1235,7 +1468,7 @@ function renderActionModal() {
   const selectedExplanation = explanationFindings.find((item) => item.id === state.selectedExplanation) || explanationFindings[0];
   const selectedFollowup = aiFollowupQuestions.find((item) => item.id === state.selectedFollowup) || aiFollowupQuestions[0];
   const selectedDeliverable = deliverables.find((item) => item.id === state.selectedDeliverable) || deliverables[0];
-  const selectedKnowledge = getSelectedKnowledgeDoc();
+  const selectedKnowledge = getSelectedKnowledgeDoc() || knowledgeDocs[0];
   const selectedKnowledgeCallable = isKnowledgeCallable(selectedKnowledge);
   const selectedKnowledgeTab = knowledgeTabs.find(([id]) => id === selectedKnowledge.scope) || knowledgeTabs[0];
 
@@ -1290,7 +1523,6 @@ function renderActionModal() {
           </article>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
-            <button class="primary" data-action="send-followup-question">发送给客户</button>
           </footer>
         </section>
       </div>
@@ -1355,7 +1587,6 @@ function renderActionModal() {
           </div>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
-            <button class="primary" data-action="submit-explanation">生成解释稿</button>
           </footer>
         </section>
       </div>
@@ -1414,11 +1645,26 @@ function renderActionModal() {
             <p>${selectedKnowledge.name}</p>
           </header>
           <div class="knowledge-op-list">
-            <button data-action="knowledge-op" data-op="rename" data-id="${selectedKnowledge.id}">${icon("file", 18)}<span><strong>重命名</strong><em>调整知识文档名称</em></span></button>
-            <button data-action="knowledge-op" data-op="preview" data-id="${selectedKnowledge.id}">${icon("monitor", 18)}<span><strong>打开预览</strong><em>查看解析内容和索引切片</em></span></button>
-            <button data-action="toggle-knowledge-callable" data-id="${selectedKnowledge.id}">${icon("sparkle", 18)}<span><strong>${selectedKnowledgeCallable ? "关闭本次会议调用" : "开启本次会议调用"}</strong><em>${selectedKnowledgeCallable ? "AI 将不再引用该文档" : "AI 可在本次会议引用该文档"}</em></span></button>
-            <button data-action="knowledge-op" data-op="visibility" data-id="${selectedKnowledge.id}">${icon("lock", 18)}<span><strong>调整可见范围</strong><em>当前：${selectedKnowledge.visible}</em></span></button>
-            <button data-action="knowledge-op" data-op="download" data-id="${selectedKnowledge.id}">${icon("download", 18)}<span><strong>下载原文件</strong><em>${selectedKnowledge.type.toUpperCase()} · ${selectedKnowledge.size}</em></span></button>
+            <section>
+              <div>${icon("file", 18)}<span><strong>重命名</strong><em>调整知识文档名称</em></span></div>
+              <div class="knowledge-op-control">
+                <input class="knowledge-rename-input" value="${escapeHtml(selectedKnowledge.name)}" />
+                <button class="primary compact" data-action="knowledge-rename-save" data-id="${selectedKnowledge.id}">保存</button>
+              </div>
+            </section>
+            <section>
+              <div>${icon("lock", 18)}<span><strong>调整可见范围</strong><em>当前：${selectedKnowledge.visible}</em></span></div>
+              <div class="knowledge-op-control">
+                <select class="knowledge-visibility-select">
+                  ${["仅我可见", "团队可调用", "企业成员可见"].map((option) => `<option ${selectedKnowledge.visible === option ? "selected" : ""}>${option}</option>`).join("")}
+                </select>
+                <button class="primary compact" data-action="knowledge-visibility-save" data-id="${selectedKnowledge.id}">保存</button>
+              </div>
+            </section>
+            <section>
+              <div>${icon("download", 18)}<span><strong>下载源文件</strong><em>${selectedKnowledge.type.toUpperCase()} · ${selectedKnowledge.size}</em></span></div>
+              <button class="ghost compact" data-action="knowledge-download" data-id="${selectedKnowledge.id}">下载</button>
+            </section>
           </div>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
@@ -1436,13 +1682,13 @@ function renderActionModal() {
     "deliverable-open": ["打开交付物", `${selectedDeliverable.name} 会在会议交互空间中打开，并把本次打开事件写入会议时间线。`],
     "concept-search": ["索引依据", `基于会议原话“${selectedExplanation.trigger}”检索：${selectedExplanation.keywords.join("、")}。当前索引来源包括：${selectedExplanation.lookupTargets.join("、")}。`],
     "ai-more": ["更多 AI 反问", "这里展示 AI 根据会议转写、材料上下文和客户诉求生成的反问队列，支持按对象、状态和触发片段筛选。"],
-    "send-material": ["发送材料", "将当前解释材料或交付物发送给客户确认，调用 POST /meetings/:id/customer-messages。"],
+    "send-material": ["发送材料", "将当前解释材料或交付物提交到会议空间，供后续交付物归档。"],
     "export-summary": ["导出纪要", "支持导出 DOCX/PDF，并附带会议结论、待办、引用材料和交付物版本。"],
     "share-summary": ["分享归档", "生成只读分享链接，可设置有效期、访问密码和可下载范围。"],
     "upload-knowledge": ["上传知识文档", "上传后调用 POST /knowledge/documents，后端解析、切片、向量化并返回可用状态。"],
     "add-tag": ["添加标签", "为当前知识文档追加标签，调用 POST /knowledge/documents/:id/tags。"],
     "knowledge-preview": ["知识预览", "预览当前文档的解析文本、切片、标签和可被本次会议调用的范围。"],
-    "knowledge-more": ["知识更多操作", "包含重命名、移动范围、删除、权限设置、设为本次会议可调用等操作。"]
+    "knowledge-more": ["知识更多操作", "包含重命名、可见范围调整和源文件下载。"]
   };
   const [title, body] = map[state.modal] || ["操作", "该操作已接入前端反馈，后续可替换为真实接口调用。"];
   return `
@@ -1468,7 +1714,7 @@ function createAnnotationId() {
   return `ann-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function getAnnotationImageRect() {
+function getAnnotationImageRect(visual = false) {
   const canvas = document.querySelector(".annotation-canvas");
   const image = canvas?.querySelector("img");
   if (!canvas || !image) return null;
@@ -1485,6 +1731,15 @@ function getAnnotationImageRect() {
   } else {
     height = frame.width / imageRatio;
     top = frame.top + (frame.height - height) / 2;
+  }
+  if (visual && state.zoom !== 100) {
+    const zoom = state.zoom / 100;
+    const centerX = frame.left + frame.width / 2;
+    const centerY = frame.top + frame.height / 2;
+    left = centerX + (left - centerX) * zoom;
+    top = centerY + (top - centerY) * zoom;
+    width *= zoom;
+    height *= zoom;
   }
   return { left, top, width, height, frameLeft: frame.left, frameTop: frame.top };
 }
@@ -1505,7 +1760,7 @@ function updateAnnotationViewport() {
 }
 
 function getCanvasPoint(event) {
-  const rect = getAnnotationImageRect();
+  const rect = getAnnotationImageRect(true);
   if (!rect) return null;
   if (event.clientX < rect.left || event.clientX > rect.left + rect.width || event.clientY < rect.top || event.clientY > rect.top + rect.height) {
     return null;
@@ -1689,9 +1944,8 @@ document.addEventListener("click", async (event) => {
   if (action === "open-create") state.showCreate = true;
   if (action === "close-create") state.showCreate = false;
   if (action === "start-meeting") {
-    state.showCreate = false;
-    state.view = "meeting";
-    startMeetingEvents(state.selectedMeetingId);
+    await startNewMeetingFromForm();
+    return;
   }
   if (action === "open-meeting") {
     state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
@@ -1736,6 +1990,18 @@ document.addEventListener("click", async (event) => {
       setToast(`${doc.name}：${labelMap[op] || "操作已触发"}`, false);
     }
   }
+  if (action === "knowledge-rename-save") {
+    saveKnowledgeRename(target.dataset.id);
+    return;
+  }
+  if (action === "knowledge-visibility-save") {
+    saveKnowledgeVisibility(target.dataset.id);
+    return;
+  }
+  if (action === "knowledge-download") {
+    downloadKnowledgeSource(target.dataset.id);
+    return;
+  }
   if (action === "open-upload") {
     state.fileUploadContext = target.dataset.context || "material";
     document.querySelector(".native-file-input")?.click();
@@ -1747,7 +2013,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-material") {
     state.selectedMaterial = target.dataset.id;
-    setToast("材料已在会议空间打开");
+    setToast("材料已选中，双击可投屏");
   }
   if (action === "select-deliverable") state.selectedDeliverable = target.dataset.id;
   if (action === "select-followup") state.selectedFollowup = target.dataset.id;
@@ -1761,10 +2027,6 @@ document.addEventListener("click", async (event) => {
     state.fileUploadContext = "vpbuddy-material";
     document.querySelector(".native-file-input")?.click();
     return;
-  }
-  if (action === "send-followup-question") {
-    pushVpbuddyMessage(`发送 AI 反问：${(aiFollowupQuestions.find((item) => item.id === state.selectedFollowup) || aiFollowupQuestions[0]).question}`, "followup");
-    setToast("AI 反问已发送给客户");
   }
   if (action === "open-followup") {
     state.selectedFollowup = target.dataset.id;
@@ -1797,6 +2059,10 @@ document.addEventListener("click", async (event) => {
   if (action === "zoom") {
     state.zoom = Math.max(60, Math.min(160, state.zoom + Number(target.dataset.step)));
   }
+  if (action === "toggle-fullscreen") {
+    await toggleStageFullscreen();
+    return;
+  }
   if (action === "select-slide") state.currentSlide = Number(target.dataset.slide);
   if (action === "slide-step") {
     const next = state.currentSlide + Number(target.dataset.step);
@@ -1805,16 +2071,37 @@ document.addEventListener("click", async (event) => {
   if (action === "concept-search") {
     state.modal = "concept-search";
   }
-  if (action === "submit-explanation") {
-    const selected = explanationFindings.find((item) => item.id === state.selectedExplanation);
-    if (selected) selected.status = "已生成解释稿";
-    setToast("解释稿已基于会议记录和索引依据生成");
+  if (action === "test-ai-settings") {
+    await testAISettings();
+    return;
+  }
+  if (action === "save-ai-settings") {
+    await saveAISettings();
+    return;
   }
 
   render();
 });
 
+document.addEventListener("dblclick", async (event) => {
+  const row = event.target.closest(".material-row[data-id]");
+  if (!row) return;
+  event.preventDefault();
+  await presentMaterial(row.dataset.id);
+});
+
 document.addEventListener("input", (event) => {
+  if (event.target.matches(".knowledge-search-input")) {
+    state.knowledgeSearch = event.target.value;
+    const firstDoc = getKnowledgeDocsForCurrentTab()[0];
+    state.selectedKnowledge = firstDoc?.id || "";
+    render();
+    return;
+  }
+  if (event.target.matches(".settings-api-key, .settings-model, .settings-endpoint")) {
+    updateSettingsFromInputs();
+    return;
+  }
   if (event.target.matches(".vpbuddy-input")) {
     state.composerText = event.target.value;
     const counter = document.querySelector(".composer-count");
@@ -1826,6 +2113,10 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.matches(".settings-model")) {
+    updateSettingsFromInputs();
+    return;
+  }
   if (!event.target.matches(".native-file-input")) return;
   const files = Array.from(event.target.files || []);
   if (!files.length) return;

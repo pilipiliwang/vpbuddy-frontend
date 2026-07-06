@@ -68,7 +68,10 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
     listDevices: () => request("/client/devices"),
     getWorkspaceStorage: () => request("/workspace/storage"),
     listMeetings: () => request("/meetings"),
-    createMeeting: (input) => request("/meetings", { method: "POST", body: JSON.stringify(input) }),
+    createMeeting: (input = {}) => {
+      const query = input.meetingId || input.meeting_id ? `?meeting_id=${encodeURIComponent(input.meetingId || input.meeting_id)}` : "";
+      return request(`/api/meetings/stream_start${query}`, { method: "POST" });
+    },
     getMeeting: (id) => request(`/meetings/${id}`),
     startRecording: (meetingId) => request(`/meetings/${meetingId}/recording/start`, { method: "POST" }),
     stopRecording: (meetingId) => request(`/meetings/${meetingId}/recording/stop`, { method: "POST" }),
@@ -154,7 +157,7 @@ export const endpoints = {
   },
   meetings: {
     list: "GET /meetings",
-    create: "POST /meetings",
+    create: "POST /api/meetings/stream_start",
     detail: "GET /meetings/:id",
     startRecording: "POST /meetings/:id/recording/start",
     stopRecording: "POST /meetings/:id/recording/stop",

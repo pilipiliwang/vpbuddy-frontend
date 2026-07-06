@@ -139,6 +139,58 @@ select:focus-visible {
   background: linear-gradient(90deg, #244eff, #8434ff);
 }
 
+.brand-mark::before,
+.brand-mark::after {
+  top: 6px;
+  width: 24px;
+  height: 52px;
+  border-radius: 9px 9px 11px 11px;
+}
+
+.brand-mark::before {
+  left: 9px;
+  transform: rotate(-14deg);
+  background: linear-gradient(180deg, #22cfff 0%, #2474ff 64%, #623dff 100%);
+}
+
+.brand-mark::after {
+  right: 9px;
+  transform: rotate(14deg);
+  background: linear-gradient(180deg, #8a38ff 0%, #5363ff 58%, #08c4ff 100%);
+}
+
+.brand-mark span {
+  left: 20px;
+  bottom: 7px;
+  width: 28px;
+  height: 15px;
+  border-radius: 0 0 10px 10px;
+  background: linear-gradient(90deg, #276fff 0%, #583eff 54%, #8a38ff 100%);
+}
+
+.brand-compact .brand-mark::before,
+.brand-compact .brand-mark::after {
+  top: 5px;
+  width: 18px;
+  height: 38px;
+  border-radius: 7px 7px 9px 9px;
+}
+
+.brand-compact .brand-mark::before {
+  left: 7px;
+}
+
+.brand-compact .brand-mark::after {
+  right: 7px;
+}
+
+.brand-compact .brand-mark span {
+  left: 15px;
+  bottom: 5px;
+  width: 21px;
+  height: 11px;
+}
+
 .primary,
 .secondary,
 .ghost,
@@ -231,6 +283,20 @@ textarea::placeholder {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 5px rgba(9, 219, 161, 0.12), 0 0 16px rgba(9, 219, 161, 0.7);
+}
+
+.status-dot.on {
+  background: var(--green);
+}
+
+.status-dot.off {
+  background: #6f7d9e;
+  box-shadow: 0 0 0 5px rgba(111, 125, 158, 0.12);
+}
+
+.status-dot.pending {
+  background: var(--yellow);
+  box-shadow: 0 0 0 5px rgba(255, 201, 76, 0.12), 0 0 14px rgba(255, 201, 76, 0.42);
 }
 
 .status-check {
@@ -943,7 +1009,7 @@ textarea::placeholder {
   min-height: 78px;
   padding: 0 14px;
   display: grid;
-  grid-template-columns: 42px 1fr 18px;
+  grid-template-columns: 42px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   background: rgba(10, 29, 57, 0.46);
@@ -1296,6 +1362,19 @@ textarea::placeholder {
   flex-direction: column;
 }
 
+.center-card:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  padding: 18px;
+  border: 0;
+  border-radius: 0;
+  background: #020b1d;
+}
+
+.center-card:fullscreen .slide-frame {
+  min-height: 0;
+}
+
 .center-tabs {
   min-width: 0;
   height: 42px;
@@ -1445,6 +1524,15 @@ textarea::placeholder {
   min-height: 0;
   flex: 1 1 auto;
   cursor: default;
+}
+
+.stage-zoom-layer {
+  position: absolute;
+  inset: 0;
+  transform: scale(var(--stage-zoom, 1));
+  transform-origin: center center;
+  transition: transform 160ms ease;
+  will-change: transform;
 }
 
 .slide-frame img,
@@ -2632,6 +2720,14 @@ textarea::placeholder {
   background: rgba(20, 45, 88, 0.52);
 }
 
+.kb-empty {
+  min-height: 140px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(74, 115, 176, 0.18);
+}
+
 .knowledge-detail {
   padding: 22px;
 }
@@ -2724,6 +2820,12 @@ textarea::placeholder {
   display: grid;
   grid-template-columns: 1fr 1.55fr;
   gap: 16px;
+}
+
+.knowledge-detail.empty-detail {
+  display: grid;
+  align-content: center;
+  gap: 10px;
 }
 
 .settings-card {
@@ -3038,7 +3140,8 @@ textarea::placeholder {
   gap: 10px;
 }
 
-.knowledge-op-list button {
+.knowledge-op-list > button,
+.knowledge-op-list section {
   min-height: 64px;
   padding: 12px 14px;
   display: grid;
@@ -3052,9 +3155,49 @@ textarea::placeholder {
   text-align: left;
 }
 
-.knowledge-op-list button:hover {
+.knowledge-op-list > button:hover,
+.knowledge-op-list section:hover {
   border-color: rgba(55, 145, 255, 0.72);
   background: rgba(29, 82, 151, 0.42);
+}
+
+.knowledge-op-list section {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.knowledge-op-list section > div:first-child {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.knowledge-op-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.knowledge-op-control input,
+.knowledge-op-control select {
+  min-width: 0;
+  height: 42px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(44, 104, 194, 0.55);
+  background: rgba(2, 13, 34, 0.62);
+  color: #fff;
+}
+
+.knowledge-op-list .compact {
+  min-height: 42px;
+  height: 42px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 .knowledge-op-list strong,
