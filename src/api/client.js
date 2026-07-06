@@ -104,6 +104,17 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
       request(`/meetings/${meetingId}/events`, { method: "POST", body: JSON.stringify(event) }),
     sendChat: (meetingId, message, role = "user") =>
       request(`/api/meetings/${meetingId}/chat`, { method: "POST", body: JSON.stringify({ message, role }) }),
+    sendChatAttachment: (meetingId, file, text = "") => {
+      const data = new FormData();
+      if (text) data.append("text", text);
+      data.append("files", file);
+      return request(`/api/meetings/${meetingId}/chat`, {
+        method: "POST",
+        body: data,
+        headers: {},
+        timeoutMs: 30000
+      });
+    },
     listChatHistory: (meetingId) => request(`/api/meetings/${meetingId}/chat/history`),
     listDeliverables: (meetingId) => request(`/meetings/${meetingId}/deliverables`),
     getDeliverable: (deliverableId) => request(`/deliverables/${deliverableId}`),
@@ -165,6 +176,7 @@ export const endpoints = {
   },
   ai: {
     chat: "POST /api/meetings/:id/chat",
+    chatAttachment: "POST /api/meetings/:id/chat multipart/form-data",
     chatHistory: "GET /api/meetings/:id/chat/history",
     kbSearch: "POST /api/kb/search"
   },

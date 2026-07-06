@@ -1652,9 +1652,9 @@ async function captureStageScreenshot() {
   const material = addMeetingMaterialFromFile(file, { select: true });
   state.meetingLeftTab = "materials";
   try {
-    await api.uploadMaterial(state.selectedMeetingId, file);
+    await api.sendChatAttachment(state.selectedMeetingId, file, "投屏截屏，请识别图片内容并作为会议材料参考。");
     setApiStatus("connected", "已连接后端");
-    setToast(`截屏已上传为会议材料：${material.name}，等待后端解析`);
+    setToast(`截屏已发送给后端：${material.name}，并加入会议材料列表`);
   } catch {
     setToast(`截屏已加入会议材料：${material.name}，后端连接后可同步`);
   }
