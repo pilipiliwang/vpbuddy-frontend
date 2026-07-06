@@ -1,4 +1,8 @@
+import { createVpbuddyApi } from "./api/client.js";
+
 const app = document.querySelector("#app");
+const apiBaseUrl = window.VPBUDDY_API_BASE_URL || window.localStorage?.getItem("vpbuddy.apiBaseUrl") || "http://127.0.0.1:8765";
+const api = createVpbuddyApi({ baseUrl: apiBaseUrl });
 
 const state = {
   view: "login",
@@ -7,6 +11,7 @@ const state = {
   meetingLeftTab: "materials",
   knowledgeTab: "personal",
   selectedKnowledge: "kb-1",
+  selectedMeetingId: "m-1",
   selectedMaterial: "mat-1",
   selectedDeliverable: "del-demo",
   selectedFollowup: "fq-1",
@@ -23,12 +28,15 @@ const state = {
   vpbuddyMessages: [],
   fileUploadContext: "material",
   knowledgeCallable: {},
+  apiStatus: "idle",
+  apiMessage: "演示数据",
   zoom: 100,
   toast: "",
   modal: ""
 };
 
 let toastTimer = 0;
+let meetingEventSource = null;
 
 const assets = {
   slide: "assets/slide-esg-solution.png",
@@ -384,6 +392,245 @@ function isKnowledgeCallable(doc) {
   return state.knowledgeCallable[doc.id] !== false;
 }
 
+function replaceArray(target, next) {
+  target.splice(0, target.length, ...next);
+}
+
+function getSelectedMeeting() {
+  return meetings.find((item) => item.id === state.selectedMeetingId) || meetings[0];
+}
+
+function normalizeStatus(value) {
+  const status = String(value || "").toLowerCase();
+  if (["running", "active", "recording", "live", "进行中"].some((item) => status.includes(item))) return "进行中";
+  if (["done", "ended", "closed", "archived", "complete", "已结束"].some((item) => status.includes(item))) return "已结束";
+  return value || "进行中";
+}
+
+function normalizeMeeting(raw, index = 0) {
+  const stateData = raw.state || {};
+  const id = raw.id || raw.meeting_id || stateData.meeting_id || `mtg-${index + 1}`;
+  const title = raw.title || raw.name || raw.projectName || raw.project_name || stateData.title || stateData.project_name || `会议 ${index + 1}`;
+  const desc = raw.desc || raw.description || raw.objective || stateData.objective || "会议协同与交付生成";
+  const time = raw.time || raw.startedAt || raw.started_at || raw.createdAt || raw.created_at || "进行中";
+  const covers = ["assets/meeting-city.png", "assets/meeting-bulb.png", "assets/meeting-globe.png", "assets/meeting-wind.png", "assets/meeting-wave.png", "assets/meeting-forest.png"];
+
+  return {
+    id,
+    title,
+    desc,
+    time,
+    status: normalizeStatus(raw.status || raw.phase || stateData.status),
+    cover: raw.cover || covers[index % covers.length]
+  };
+}
+
+function normalizeMeetingsResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.meetings || payload?.items || payload?.data || [];
+  return list.map(normalizeMeeting);
+}
+
+function secondsToTime(seconds) {
+  if (!Number.isFinite(Number(seconds))) return nowTime();
+  const total = Math.max(0, Math.floor(Number(seconds)));
+  const h = String(Math.floor(total / 3600)).padStart(2, "0");
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const s = String(total % 60).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
+
+function normalizeTranscriptSegment(segment, index = 0) {
+  const speaker = segment.speaker_name || segment.speaker || segment.name || "会议参与者";
+  const text = segment.text || segment.cleaned_text || segment.content || segment.message || "";
+  const tone = speaker.includes("AI") ? "ai" : speaker.includes("客户") || speaker.includes("甲方") ? "customer" : index === 0 ? "host" : "team";
+  return {
+    time: segment.time || secondsToTime(segment.start_sec ?? segment.startSec ?? index * 15),
+    speaker,
+    role: segment.role || (tone === "customer" ? "甲方" : tone === "ai" ? "系统" : "乙方"),
+    tone,
+    text
+  };
+}
+
+function normalizeTranscriptResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.segments || payload?.transcript_segments || [];
+  return list.map(normalizeTranscriptSegment).filter((item) => item.text);
+}
+
+function normalizeDeliverableType(kind) {
+  const value = String(kind || "").toLowerCase();
+  const map = {
+    req: "word",
+    requirements: "word",
+    summary: "word",
+    arch: "code",
+    architecture: "code",
+    tasks: "task",
+    task: "task",
+    risk: "task",
+    api: "api",
+    demo: "demo"
+  };
+  return map[value] || value || "word";
+}
+
+function normalizeDeliverable(raw, index = 0) {
+  const kind = raw.kind || raw.type || raw.doc_kind;
+  const labels = { req: "需求清单", requirements: "需求清单", arch: "技术方案", architecture: "技术方案", tasks: "任务拆解", risk: "风险清单", api: "API设计", demo: "交互 Demo", summary: "会议纪要" };
+  const id = raw.id || raw.deliverableId || raw.deliverable_id || `del-${state.selectedMeetingId}-${kind || index + 1}`;
+  return {
+    id,
+    name: raw.name || raw.label || labels[kind] || `交付物 ${index + 1}`,
+    subtitle: raw.subtitle || raw.description || "后端生成文档",
+    type: normalizeDeliverableType(kind),
+    status: normalizeStatus(raw.status || "已完成"),
+    time: raw.updatedAt || raw.updated_at || raw.createdAt || raw.created_at || nowTime(),
+    version: raw.version ? `V${raw.version}` : "V1.0",
+    desc: raw.desc || raw.description || raw.path || "由后端文档生成接口返回。"
+  };
+}
+
+function normalizeDeliverablesResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.deliverables || payload?.docs || payload?.items || [];
+  return list.map(normalizeDeliverable);
+}
+
+function normalizeChatMessage(message) {
+  return {
+    id: message.id || createAnnotationId(),
+    time: message.created_at ? new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : nowTime(),
+    text: message.content || message.message || message.text || "",
+    type: message.role === "assistant" ? "answer" : "question"
+  };
+}
+
+function setApiStatus(status, message) {
+  state.apiStatus = status;
+  state.apiMessage = message;
+}
+
+async function loadMeetingsFromBackend() {
+  setApiStatus("loading", "连接后端中");
+  render();
+  try {
+    const payload = await api.listMeetings();
+    const next = normalizeMeetingsResponse(payload);
+    if (next.length) {
+      replaceArray(meetings, next);
+      if (!meetings.some((item) => item.id === state.selectedMeetingId)) state.selectedMeetingId = meetings[0].id;
+    }
+    setApiStatus("connected", "已连接后端");
+  } catch (error) {
+    setApiStatus("mock", "后端未连接，使用演示数据");
+  }
+  render();
+}
+
+async function loadMeetingDetailFromBackend(meetingId) {
+  const results = await Promise.allSettled([
+    api.getMeeting(meetingId),
+    api.listTranscriptSegments(meetingId),
+    api.listDeliverables(meetingId),
+    api.listChatHistory(meetingId)
+  ]);
+
+  let connected = false;
+  const [detail, transcript, deliverableList, chatHistory] = results;
+
+  if (detail.status === "fulfilled" && detail.value) {
+    connected = true;
+    const meeting = normalizeMeeting(detail.value, 0);
+    const index = meetings.findIndex((item) => item.id === meetingId);
+    if (index >= 0) meetings[index] = { ...meetings[index], ...meeting, id: meetingId };
+
+    const detailTranscripts = normalizeTranscriptResponse(detail.value);
+    if (detailTranscripts.length) replaceArray(meetingRecords, detailTranscripts);
+
+    const detailDeliverables = normalizeDeliverablesResponse(detail.value);
+    if (detailDeliverables.length) replaceArray(deliverables, detailDeliverables);
+  }
+
+  if (transcript.status === "fulfilled") {
+    connected = true;
+    const nextRecords = normalizeTranscriptResponse(transcript.value);
+    if (nextRecords.length) replaceArray(meetingRecords, nextRecords);
+  }
+
+  if (deliverableList.status === "fulfilled") {
+    connected = true;
+    const nextDeliverables = normalizeDeliverablesResponse(deliverableList.value);
+    if (nextDeliverables.length) replaceArray(deliverables, nextDeliverables);
+  }
+
+  if (chatHistory.status === "fulfilled") {
+    connected = true;
+    const history = Array.isArray(chatHistory.value) ? chatHistory.value : chatHistory.value?.messages || chatHistory.value?.history || [];
+    const messages = history.map(normalizeChatMessage).filter((item) => item.text);
+    if (messages.length) {
+      replaceArray(state.vpbuddyMessages, messages.reverse());
+      state.showComposerHistory = true;
+    }
+  }
+
+  setApiStatus(connected ? "connected" : "mock", connected ? "已连接后端" : "后端未连接，使用演示数据");
+  render();
+}
+
+function closeMeetingEvents() {
+  if (meetingEventSource) {
+    meetingEventSource.close();
+    meetingEventSource = null;
+  }
+}
+
+function startMeetingEvents(meetingId) {
+  if (!window.EventSource) return;
+  closeMeetingEvents();
+  try {
+    meetingEventSource = new EventSource(api.eventsUrl(meetingId));
+    meetingEventSource.addEventListener("transcript-segment", (event) => {
+      const segment = normalizeTranscriptSegment(JSON.parse(event.data || "{}"), meetingRecords.length);
+      if (segment.text) {
+        meetingRecords.push(segment);
+        render();
+      }
+    });
+    meetingEventSource.addEventListener("chat-message", (event) => {
+      const message = normalizeChatMessage(JSON.parse(event.data || "{}"));
+      if (message.text) {
+        state.vpbuddyMessages.unshift(message);
+        state.showComposerHistory = true;
+        render();
+      }
+    });
+    meetingEventSource.addEventListener("meeting-complete", () => {
+      const meeting = getSelectedMeeting();
+      if (meeting) meeting.status = "已结束";
+      setToast("会议已完成，交付物和记录已同步");
+    });
+  } catch {
+    closeMeetingEvents();
+  }
+}
+
+async function sendVpbuddyChatMessage(text) {
+  pushVpbuddyMessage(text, "question");
+  state.composerText = "";
+  render();
+
+  try {
+    const response = await api.sendChat(state.selectedMeetingId, text);
+    const answer = normalizeChatMessage(response);
+    if (answer.text) state.vpbuddyMessages.unshift(answer);
+    setApiStatus("connected", "已连接后端");
+    setToast("问题已发送给 VPBuddy");
+  } catch {
+    setApiStatus("mock", "后端未连接，消息已保存到本地记录");
+    setToast("问题已保存到本地记录，后端连接后可同步");
+  }
+  render();
+}
+
 function renderLogin() {
   return `
     <main class="login-page">
@@ -454,7 +701,10 @@ function renderShell(content) {
 function renderWorkspace() {
   const body = `
     <header class="page-header">
-      <h1>工作台</h1>
+      <div>
+        <h1>工作台</h1>
+        <p class="api-state ${state.apiStatus}">${state.apiMessage}</p>
+      </div>
       <button class="primary" data-action="open-create">${icon("plus")}新建会议</button>
     </header>
     <section class="meeting-grid">
@@ -477,7 +727,7 @@ function renderMeetingCard(meeting) {
         <p>${meeting.desc}</p>
         <div class="meeting-actions">
           <span>${icon("calendar", 18)}${meeting.time}</span>
-          <button class="${running ? "primary compact" : "ghost compact"}" data-action="${running ? "open-meeting" : "open-summary"}">
+          <button class="${running ? "primary compact" : "ghost compact"}" data-action="${running ? "open-meeting" : "open-summary"}" data-id="${meeting.id}">
             ${running ? "进入会议" : "查看总结"} ${icon(running ? "arrowRight" : "file", 18)}
           </button>
         </div>
@@ -510,6 +760,8 @@ function renderCreateModal() {
 }
 
 function renderMeetingStage() {
+  const meeting = getSelectedMeeting();
+  const running = meeting?.status !== "已结束";
   return `
     <main class="stage-screen">
       <header class="stage-topbar">
@@ -518,8 +770,8 @@ function renderMeetingStage() {
           <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
         </div>
         <div class="stage-title">
-          <h1>XX公司-ESG碳管理系统需求沟通会</h1>
-          <span class="recording"><i></i>录制中</span>
+          <h1>${escapeHtml(meeting?.title || "会议空间")}</h1>
+          <span class="recording"><i></i>${running ? "录制中" : "已结束"}</span>
           <span class="timer">00:28:34</span>
         </div>
         <div class="stage-actions">
@@ -842,13 +1094,14 @@ function renderTimeline() {
 }
 
 function renderSummary() {
+  const meeting = getSelectedMeeting();
   return `
     <main class="summary-page">
       <header class="summary-header">
         <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
-        <h1>XX公司-ESG碳管理系统需求沟通会</h1>
-        <span class="ended-chip">已结束</span>
-        <p>2024年5月15日（周三）10:00 - 11:30</p>
+        <h1>${escapeHtml(meeting?.title || "会议总结")}</h1>
+        <span class="ended-chip">${meeting?.status || "已结束"}</span>
+        <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
         <div>
           <button class="primary" data-action="modal" data-modal="export-summary">${icon("download")}导出纪要</button>
           <button class="secondary" data-action="modal" data-modal="share-summary">${icon("share")}分享</button>
@@ -867,7 +1120,7 @@ function renderSummary() {
         <article class="panel minute">
           <h2>${icon("file")}会议纪要摘要</h2>
           <h3>会议概况</h3>
-          <p>会议时间：2024年5月15日（周三）10:00 - 11:30</p>
+          <p>会议时间：${escapeHtml(meeting?.time || "会议已结束")}</p>
           <p>会议时长：1小时30分钟</p>
           <p>会议地点：线上会议（VPBuddy）</p>
           <h3>参会人员</h3>
@@ -1398,7 +1651,13 @@ async function captureStageScreenshot() {
   const file = new File([blob], `投屏截图-${stamp}.png`, { type: "image/png" });
   const material = addMeetingMaterialFromFile(file, { select: true });
   state.meetingLeftTab = "materials";
-  setToast(`截屏已上传为会议材料：${material.name}，等待后端解析`);
+  try {
+    await api.uploadMaterial(state.selectedMeetingId, file);
+    setApiStatus("connected", "已连接后端");
+    setToast(`截屏已上传为会议材料：${material.name}，等待后端解析`);
+  } catch {
+    setToast(`截屏已加入会议材料：${material.name}，后端连接后可同步`);
+  }
   render();
 }
 
@@ -1409,8 +1668,16 @@ document.addEventListener("click", async (event) => {
 
   if (action !== "tool" && action !== "annotation-hit") commitTextDraft();
 
-  if (action === "login") state.view = "workspace";
-  if (action === "nav") state.view = target.dataset.view;
+  if (action === "login") {
+    state.view = "workspace";
+    render();
+    await loadMeetingsFromBackend();
+    return;
+  }
+  if (action === "nav") {
+    state.view = target.dataset.view;
+    if (state.view !== "meeting") closeMeetingEvents();
+  }
   if (action === "modal") {
     if (target.dataset.id) state.selectedKnowledge = target.dataset.id;
     state.modal = target.dataset.modal;
@@ -1424,9 +1691,21 @@ document.addEventListener("click", async (event) => {
   if (action === "start-meeting") {
     state.showCreate = false;
     state.view = "meeting";
+    startMeetingEvents(state.selectedMeetingId);
   }
-  if (action === "open-meeting") state.view = "meeting";
-  if (action === "open-summary") state.view = "summary";
+  if (action === "open-meeting") {
+    state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
+    state.view = "meeting";
+    render();
+    startMeetingEvents(state.selectedMeetingId);
+    await loadMeetingDetailFromBackend(state.selectedMeetingId);
+    return;
+  }
+  if (action === "open-summary") {
+    state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
+    state.view = "summary";
+    closeMeetingEvents();
+  }
   if (action === "stage-tab") state.stageTab = target.dataset.tab;
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
   if (action === "knowledge-tab") {
@@ -1475,9 +1754,8 @@ document.addEventListener("click", async (event) => {
   if (action === "toggle-composer-history") state.showComposerHistory = !state.showComposerHistory;
   if (action === "send-vpbuddy-message") {
     const text = state.composerText.trim();
-    pushVpbuddyMessage(text || "请根据当前会议内容继续分析并给出建议。");
-    state.composerText = "";
-    setToast("问题已发送给 VPBuddy");
+    await sendVpbuddyChatMessage(text || "请根据当前会议内容继续分析并给出建议。");
+    return;
   }
   if (action === "send-vpbuddy-material") {
     state.fileUploadContext = "vpbuddy-material";
@@ -1547,7 +1825,7 @@ document.addEventListener("input", (event) => {
   state.textDraft.value = event.target.value;
 });
 
-document.addEventListener("change", (event) => {
+document.addEventListener("change", async (event) => {
   if (!event.target.matches(".native-file-input")) return;
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
@@ -1556,10 +1834,16 @@ document.addEventListener("change", (event) => {
     pushVpbuddyMessage(`发送材料：${names}`, "material");
     setToast("材料已选择并发送给 VPBuddy");
   } else if (state.fileUploadContext === "knowledge") {
-    setToast(`已选择知识文档：${names}`);
+    const results = await Promise.allSettled(files.map((file) => api.uploadKnowledgeDocument(file, { meetingId: state.selectedMeetingId })));
+    const succeeded = results.some((item) => item.status === "fulfilled");
+    setApiStatus(succeeded ? "connected" : "mock", succeeded ? "已连接后端" : "后端未连接，知识文档保留在本地选择记录");
+    setToast(succeeded ? `知识文档已上传：${names}` : `已选择知识文档：${names}，后端连接后可上传`);
   } else {
     const uploaded = files.map((file) => addMeetingMaterialFromFile(file, { select: true }));
-    setToast(`会议材料已上传：${uploaded.map((item) => item.name).join("、")}，等待后端解析`);
+    const results = await Promise.allSettled(files.map((file) => api.uploadMaterial(state.selectedMeetingId, file)));
+    const succeeded = results.some((item) => item.status === "fulfilled");
+    setApiStatus(succeeded ? "connected" : state.apiStatus, succeeded ? "已连接后端" : state.apiMessage);
+    setToast(succeeded ? `会议材料已上传：${uploaded.map((item) => item.name).join("、")}，等待后端解析` : `会议材料已加入本地列表：${uploaded.map((item) => item.name).join("、")}`);
   }
   event.target.value = "";
   render();

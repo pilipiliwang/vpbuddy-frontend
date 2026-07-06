@@ -16,6 +16,21 @@
 
 本轮补充口径：不是所有 UI 操作都需要后端接口。会中投屏里的画笔轨迹、当前工具、缩放比例、临时框选等可以是前端本地运行态；只有需要多端同步、会后回放、客户留痕、归档证据时，才需要后端接收批注或截图。
 
+## 2026-07-06 前端接入修正
+
+根据后端 issue 反馈，本次前端已不再要求后端补齐“客户提问 / 概念检索 / 解释材料 / 发送客户消息”等产品层重接口。当前实现采用以下收敛口径：
+
+- 工作台会议列表：优先调用 `GET /meetings`，失败时保留本地演示数据。
+- 会议详情：优先调用 `GET /meetings/{id}`，并兼容其中的 `state/docs/transcript_segments` 聚合字段。
+- 会议记录：优先调用 `GET /meetings/{id}/transcript-segments`，并监听 `GET /api/meetings/{id}/events` 的 `transcript-segment` 事件实时追加。
+- VPBuddy 输入框：统一调用 `POST /api/meetings/{id}/chat`，不再要求独立的 customer-question / concept-search / explanation / customer-message 端点。
+- Chat 历史：调用 `GET /api/meetings/{id}/chat/history`。
+- 交付物：调用 `GET /meetings/{id}/deliverables`，兼容后端 `req/arch/tasks/api/risk/demo/summary` kind 映射。
+- 知识库：上传、列表、检索按 `meeting_id` 维度调用 `/api/kb/upload`、`/api/kb/list`、`/api/kb/search`；前端 personal / enterprise / industry 仅保留为 UI 展示维度，不要求后端新增 scope 字段。
+- 导出、分享：作为前端行为处理，不要求后端新增导出/分享接口。
+
+实现策略是“真实后端优先 + mock fallback”。后端未启动或某个接口缺失时，页面继续可演示；后端可用时自动切换为真实数据和 SSE 更新。
+
 ## 后端实际存在的 HTTP 接口
 
 ### 基础与工作台

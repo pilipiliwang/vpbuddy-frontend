@@ -565,6 +565,24 @@ textarea::placeholder {
   line-height: 1;
 }
 
+.api-state {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.api-state.connected {
+  color: var(--green);
+}
+
+.api-state.mock {
+  color: #aeb9d0;
+}
+
+.api-state.loading {
+  color: #72b7ff;
+}
+
 .meeting-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(280px, 1fr));
