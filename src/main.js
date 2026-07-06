@@ -31,7 +31,6 @@ const state = {
 let toastTimer = 0;
 
 const assets = {
-  loginCity: "assets/login-cityline.png",
   slide: "assets/slide-esg-solution.png",
   dashboard: "assets/deliverable-dashboard.png",
   thumbs: [
@@ -272,6 +271,7 @@ const iconPaths = {
   book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4v15.5"/><path d="M20 4v18"/><path d="M6.5 2H20v15H6.5A2.5 2.5 0 0 0 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
   bot: '<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M9 14h.01"/><path d="M15 14h.01"/><path d="M9 18h6"/>',
   calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/>',
+  camera: '<path d="M14.5 4 13 2H9L7.5 4H5a3 3 0 0 0-3 3v11a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3Z"/><circle cx="12" cy="13" r="4"/><path d="M18 8h.01"/>',
   check: '<path d="m20 6-11 11-5-5"/>',
   chevronDown: '<path d="m6 9 6 6 6-6"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -322,7 +322,7 @@ function logo(compact = false) {
 }
 
 function docBadge(type) {
-  const labelMap = { ppt: "P", pdf: "PDF", word: "W", excel: "X", demo: "D", task: "T", code: "</>", api: "API" };
+  const labelMap = { ppt: "P", pdf: "PDF", word: "W", excel: "X", image: "IMG", demo: "D", task: "T", code: "</>", api: "API" };
   return `<span class="doc-badge doc-${type}">${labelMap[type] || "F"}</span>`;
 }
 
@@ -399,7 +399,6 @@ function renderLogin() {
             <span>${icon("send")}持续交付</span>
           </div>
         </div>
-        <img class="cityline" src="${assets.loginCity}" alt="" />
       </section>
       <section class="login-card panel">
         <header class="login-card-head">
@@ -699,6 +698,10 @@ function renderPresentationCanvas() {
         ${annotations.textNotes}
         ${state.textDraft ? `<input class="annotation-text-input" value="${escapeHtml(state.textDraft.value)}" style="left:${state.textDraft.x}%;top:${state.textDraft.y}%" placeholder="输入批注" />` : ""}
       </div>
+      <button class="stage-capture-button" data-action="capture-screenshot" title="截屏上传" aria-label="截屏上传">
+        ${icon("camera", 30)}
+        <span>截屏</span>
+      </button>
     </div>
     <div class="thumb-strip">
       <button class="thumb-arrow" data-action="slide-step" data-step="-1">${icon("arrowLeft", 16)}</button>
@@ -1280,7 +1283,126 @@ function removeAnnotation(id) {
   state.annotations = state.annotations.filter((item) => item.id !== id);
 }
 
-document.addEventListener("click", (event) => {
+function getMaterialTypeFromFileName(name) {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  if (["ppt", "pptx"].includes(ext)) return "ppt";
+  if (ext === "pdf") return "pdf";
+  if (["doc", "docx"].includes(ext)) return "word";
+  if (["xls", "xlsx"].includes(ext)) return "excel";
+  if (["png", "jpg", "jpeg", "webp"].includes(ext)) return "image";
+  return "demo";
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function addMeetingMaterialFromFile(file, options = {}) {
+  const item = {
+    id: `mat-upload-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: file.name,
+    type: getMaterialTypeFromFileName(file.name),
+    size: formatFileSize(file.size),
+    time: nowTime(),
+    version: "V1.0"
+  };
+  materials.unshift(item);
+  if (options.select) state.selectedMaterial = item.id;
+  return item;
+}
+
+function drawStageAnnotations(ctx, width, height) {
+  state.annotations.forEach((item) => {
+    ctx.save();
+    ctx.strokeStyle = item.color;
+    ctx.fillStyle = item.color;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(2, item.size * (width / 1200));
+
+    if (item.type === "pen" && item.points?.length) {
+      ctx.beginPath();
+      item.points.forEach((point, index) => {
+        const x = (point.x / 100) * width;
+        const y = (point.y / 100) * height;
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    if (item.type === "rect") {
+      const x = (Math.min(item.x, item.x2) / 100) * width;
+      const y = (Math.min(item.y, item.y2) / 100) * height;
+      const rectWidth = (Math.abs(item.x2 - item.x) / 100) * width;
+      const rectHeight = (Math.abs(item.y2 - item.y) / 100) * height;
+      ctx.fillStyle = "rgba(47, 140, 255, 0.10)";
+      ctx.fillRect(x, y, rectWidth, rectHeight);
+      ctx.strokeRect(x, y, rectWidth, rectHeight);
+    }
+
+    if (item.type === "text") {
+      const x = (item.x / 100) * width;
+      const y = (item.y / 100) * height;
+      const fontSize = Math.max(22, Math.round(width * 0.022));
+      ctx.font = `700 ${fontSize}px "Microsoft YaHei", Arial, sans-serif`;
+      ctx.lineWidth = Math.max(3, fontSize * 0.12);
+      ctx.strokeStyle = "rgba(2, 11, 29, 0.82)";
+      ctx.strokeText(item.text, x, y);
+      ctx.fillStyle = item.color;
+      ctx.fillText(item.text, x, y);
+    }
+
+    ctx.restore();
+  });
+}
+
+function canvasToPngBlob(canvas) {
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/png", 0.92));
+}
+
+async function captureStageScreenshot() {
+  const image = document.querySelector(".annotation-canvas img");
+  if (!image) {
+    setToast("暂无可截屏的投屏内容");
+    render();
+    return;
+  }
+
+  if (!image.complete) {
+    await new Promise((resolve, reject) => {
+      image.addEventListener("load", resolve, { once: true });
+      image.addEventListener("error", reject, { once: true });
+    });
+  }
+
+  const width = image.naturalWidth || 1600;
+  const height = image.naturalHeight || 900;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0, width, height);
+  drawStageAnnotations(ctx, width, height);
+
+  const blob = await canvasToPngBlob(canvas);
+  if (!blob) {
+    setToast("截屏生成失败，请重试");
+    render();
+    return;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const file = new File([blob], `投屏截图-${stamp}.png`, { type: "image/png" });
+  const material = addMeetingMaterialFromFile(file, { select: true });
+  state.meetingLeftTab = "materials";
+  setToast(`截屏已上传为会议材料：${material.name}，等待后端解析`);
+  render();
+}
+
+document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
@@ -1338,6 +1460,10 @@ document.addEventListener("click", (event) => {
   if (action === "open-upload") {
     state.fileUploadContext = target.dataset.context || "material";
     document.querySelector(".native-file-input")?.click();
+    return;
+  }
+  if (action === "capture-screenshot") {
+    await captureStageScreenshot();
     return;
   }
   if (action === "select-material") {
@@ -1432,7 +1558,8 @@ document.addEventListener("change", (event) => {
   } else if (state.fileUploadContext === "knowledge") {
     setToast(`已选择知识文档：${names}`);
   } else {
-    setToast(`已选择会议材料：${names}`);
+    const uploaded = files.map((file) => addMeetingMaterialFromFile(file, { select: true }));
+    setToast(`会议材料已上传：${uploaded.map((item) => item.name).join("、")}，等待后端解析`);
   }
   event.target.value = "";
   render();
@@ -1453,7 +1580,7 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("pointerdown", (event) => {
   const canvas = event.target.closest(".annotation-canvas");
-  if (!canvas || event.target.closest(".annotation-text-input")) return;
+  if (!canvas || event.target.closest(".annotation-text-input, .stage-capture-button")) return;
   if (state.stageTab !== "presentation") return;
 
   const point = getCanvasPoint(event);
