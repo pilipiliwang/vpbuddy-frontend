@@ -1,39 +1,53 @@
-# VPBuddy 前端原型
+# VPBuddy
 
-这是根据产品说明书与 UI 参考图还原的无后端前端项目。项目使用原生 HTML/CSS/JavaScript，不依赖第三方包；后端接口契约放在 `src/api/contracts.ts`，请求封装放在 `src/api/client.js`。
+VPBuddy 是一个 AI 会议协同与交付生成客户端。当前仓库包含前端界面和 Electron 桌面壳，后端服务、Hermes、ASR、知识库和 AI 能力全部通过 HTTP API 调用，不内置到客户端安装包。
 
-## 运行
+## 下载安装包
+
+当前版本：`v0.1.0`
+
+- Windows 安装版：[VPBuddy-Setup-0.1.0-x64.exe](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-Setup-0.1.0-x64.exe)
+- Windows 便携版：[VPBuddy-Portable-0.1.0-x64.exe](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-Portable-0.1.0-x64.exe)
+- macOS Apple Silicon：[VPBuddy-0.1.0-mac-arm64.dmg](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-0.1.0-mac-arm64.dmg)
+- macOS Intel：[VPBuddy-0.1.0-mac-x64.dmg](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-0.1.0-mac-x64.dmg)
+
+完整产物见：[GitHub Releases](https://github.com/pilipiliwang/vpbuddy-frontend/releases/tag/v0.1.0)
+
+## 后端 API
+
+默认 API 地址：
+
+```text
+http://47.100.182.3:28765
+```
+
+桌面客户端只加载本地 UI。会议、材料、知识库、AI 反问、解释材料、交付物等能力均通过后端 API 获取或提交。
+
+## 本地开发
 
 ```bash
+npm install
 npm run dev
 ```
 
-默认地址：
+桌面壳开发：
 
-```text
-http://127.0.0.1:4173
+```bash
+npm run desktop
 ```
 
-## 页面
+## 打包
 
-- 客户端登录页
-- 会议工作台与快速新建会议弹窗
-- 会议交互空间：投屏内容、交付物、AI 协同、会议时间线
-- 会后总结/归档页
-- 知识库
-- 设置
+Windows：
 
-## 接口文档
+```bash
+npm run desktop:build:win
+```
 
-- `API.md`：按业务模块整理的接口清单
-- `API_REQUIREMENTS.md`：后端实现需要的接口需求文档
-- `src/api/contracts.ts`：TypeScript DTO 与 API interface
-- `src/api/client.js`：前端请求封装
+macOS 需要在 macOS runner 或 macOS 设备上构建：
 
-## 接后端
+```bash
+npm run desktop:build:mac
+```
 
-当前页面使用本地 mock 数据。接入后端时：
-
-1. 按 `src/api/contracts.ts` 实现服务端 DTO。
-2. 使用 `createVpbuddyApi({ baseUrl, getToken })` 创建客户端。
-3. 将页面中的 mock 数据调用替换为对应 API 方法。
+GitHub Actions 会自动生成 Windows 和 macOS 安装包。

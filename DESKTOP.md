@@ -4,6 +4,17 @@ VPBuddy Desktop is an Electron shell for the existing frontend. It loads the UI 
 
 The backend, Hermes, ASR, knowledge base, and AI services are not bundled into the desktop app.
 
+## Downloads
+
+Current version: `v0.1.0`
+
+- Windows installer: [VPBuddy-Setup-0.1.0-x64.exe](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-Setup-0.1.0-x64.exe)
+- Windows portable: [VPBuddy-Portable-0.1.0-x64.exe](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-Portable-0.1.0-x64.exe)
+- macOS Apple Silicon: [VPBuddy-0.1.0-mac-arm64.dmg](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-0.1.0-mac-arm64.dmg)
+- macOS Intel: [VPBuddy-0.1.0-mac-x64.dmg](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.0/VPBuddy-0.1.0-mac-x64.dmg)
+
+Full release: [v0.1.0](https://github.com/pilipiliwang/vpbuddy-frontend/releases/tag/v0.1.0)
+
 ## API Base URL
 
 Default API base:
