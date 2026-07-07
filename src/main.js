@@ -9,7 +9,6 @@ const state = {
   showCreate: false,
   stageTab: "presentation",
   meetingLeftTab: "materials",
-  knowledgeTab: "personal",
   selectedKnowledge: "kb-1",
   selectedMeetingId: "m-1",
   selectedMaterial: "mat-1",
@@ -31,8 +30,11 @@ const state = {
   knowledgeSearch: "",
   settings: {
     apiKey: "",
-    model: "GPT-4.1",
-    endpoint: "https://api.openai.com/v1",
+    modelPreset: "minimax-m3",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimax.chat/v1",
+    apiKeyEnv: "MINIMAX_API_KEY",
     status: "idle",
     message: "尚未测试连接"
   },
@@ -139,7 +141,7 @@ const meetingRecords = [
   { time: "10:10:05", speaker: "客户 · 李明", role: "甲方", tone: "customer", text: "该方案如何实现碳排放数据的自动采集？我们现在有 ERP、能耗系统和部分手工台账。" },
   { time: "10:12:36", speaker: "客户 · 王芳", role: "甲方", tone: "customer", text: "系统如何支持多组织、多层级管理？总部和工厂看到的数据范围需要不一样。" },
   { time: "10:15:18", speaker: "客户 · 张伟", role: "甲方", tone: "customer", text: "减排路径建议基于哪些数据模型？我们需要知道模型依据和可解释性。" },
-  { time: "10:16:42", speaker: "AI 助手", role: "系统", tone: "ai", text: "已生成 4 条 AI 反问，并关联会议材料、企业知识与行业知识，正在沉淀解释材料。" },
+  { time: "10:16:42", speaker: "AI 助手", role: "系统", tone: "ai", text: "已生成 4 条 AI 反问，并关联会议材料与知识库内容，正在沉淀解释材料。" },
   { time: "10:20:09", speaker: "主持人 · 刘洋", role: "乙方", tone: "host", text: "我们先把数据采集、组织权限和减排模型作为待确认重点，会后输出需求清单和接口草案。" }
 ];
 
@@ -188,8 +190,8 @@ const deliverables = [
 ];
 
 const conceptSources = [
-  { title: "ISO 14064-1:2018 核算边界", source: "行业知识", confidence: "92%" },
-  { title: "企业能耗系统接口字段清单", source: "企业知识", confidence: "89%" },
+  { title: "ISO 14064-1:2018 核算边界", source: "知识库", confidence: "92%" },
+  { title: "企业能耗系统接口字段清单", source: "知识库", confidence: "89%" },
   { title: "ESG碳管理系统解决方案.pptx 第 3 页", source: "会议材料", confidence: "86%" }
 ];
 
@@ -199,13 +201,13 @@ const explanationFindings = [
     time: "10:16",
     title: "自动采集链路说明",
     trigger: "该方案如何实现碳排放数据的自动采集？我们现在有 ERP、能耗系统和部分手工台账。",
-    lookupTargets: ["企业知识库", "会议材料", "网络标准"],
+    lookupTargets: ["知识库", "会议材料", "网络标准"],
     keywords: ["自动采集", "ERP接口", "能耗系统", "数据校验"],
     status: "已完成索引",
     summary: "说明 ERP、能耗系统、IoT 设备和人工台账如何进入采集任务，并在核算前完成字段映射与质量校验。",
     explanation: "该问题需要结合客户现有系统和行业核算要求解释。建议说明为：通过 ERP、能耗系统、IoT 设备与人工台账建立数据连接器，按采集任务配置字段映射、频率和责任人；进入核算前先做单位、缺失值、异常波动和排放源归属校验，再把有效活动数据写入碳排核算模型。",
     evidence: [
-      { title: "企业能耗系统接口字段清单", source: "企业知识库", ref: "字段：meter_id、energy_type、reading_time、value", confidence: "89%" },
+      { title: "企业能耗系统接口字段清单", source: "知识库", ref: "字段：meter_id、energy_type、reading_time、value", confidence: "89%" },
       { title: "ESG碳管理系统解决方案.pptx", source: "会议材料", ref: "第 3 页：数据采集 / 碳排放核算", confidence: "86%" },
       { title: "ISO 14064-1:2018 数据质量要求", source: "网络标准", ref: "组织层面温室气体清单与边界", confidence: "82%" }
     ]
@@ -215,14 +217,14 @@ const explanationFindings = [
     time: "10:17",
     title: "多组织多层级权限说明",
     trigger: "系统如何支持多组织、多层级管理？总部和工厂看到的数据范围需要不一样。",
-    lookupTargets: ["会议材料", "企业知识库"],
+    lookupTargets: ["会议材料", "知识库"],
     keywords: ["组织树", "权限继承", "数据隔离", "工厂分层"],
     status: "已完成索引",
     summary: "解释集团、区域、园区、工厂、车间的组织树建模，以及角色权限和组织范围共同过滤数据的方式。",
     explanation: "该问题需要解释组织模型和权限边界。建议以集团、区域、园区、工厂、车间建立组织树；每条活动数据绑定组织节点和排放源，权限按角色和组织范围共同过滤。总部查看汇总与横向对比，工厂维护本级采集任务和核算结果。",
     evidence: [
       { title: "ESG碳管理系统解决方案.pptx", source: "会议材料", ref: "第 4 页：组织层级与权限", confidence: "91%" },
-      { title: "需求调研清单.docx", source: "企业知识库", ref: "权限范围：总部 / 分子公司 / 工厂", confidence: "87%" }
+      { title: "需求调研清单.docx", source: "知识库", ref: "权限范围：总部 / 分子公司 / 工厂", confidence: "87%" }
     ]
   },
   {
@@ -230,32 +232,26 @@ const explanationFindings = [
     time: "10:18",
     title: "减排路径模型依据",
     trigger: "减排路径建议基于哪些数据模型？我们需要知道模型依据和可解释性。",
-    lookupTargets: ["网络资料", "行业知识库", "会议材料"],
+    lookupTargets: ["网络资料", "知识库", "会议材料"],
     keywords: ["基准年", "排放因子", "情景预测", "边际减排成本"],
     status: "需联网补充",
     summary: "概括基准年、活动数据、排放因子、情景预测和边际减排成本如何支撑减排路径建议。",
     explanation: "该问题需要外部方法论与内部数据共同支撑。建议说明为：先确定基准年和组织边界，基于活动数据、排放因子、历史强度指标建立排放预测；再用情景预测比较不同产量、能源结构和减排措施组合，必要时加入边际减排成本来排序减排路径。",
     evidence: [
-      { title: "行业标杆案例集.pdf", source: "行业知识库", ref: "减排路径：情景模拟与措施组合", confidence: "84%" },
+      { title: "行业标杆案例集.pdf", source: "知识库", ref: "减排路径：情景模拟与措施组合", confidence: "84%" },
       { title: "公开方法论待检索", source: "网络资料", ref: "SBTi / GHG Protocol 相关路径建模", confidence: "待确认" },
       { title: "企业碳排放现状分析.pdf", source: "会议材料", ref: "历史排放与排放源结构", confidence: "80%" }
     ]
   }
 ];
 
-const knowledgeTabs = [
-  ["personal", "个人知识"],
-  ["enterprise", "企业知识"],
-  ["industry", "行业知识"]
-];
-
 const knowledgeDocs = [
-  { id: "kb-1", scope: "enterprise", name: "ESG碳管理系统解决方案.pptx", type: "ppt", size: "18.6 MB", updated: "2024-05-15 10:28", source: "企业上传", visible: "企业成员可见", tags: ["ESG", "碳管理", "解决方案", "数字化"] },
-  { id: "kb-2", scope: "enterprise", name: "企业碳排放现状分析.pdf", type: "pdf", size: "5.2 MB", updated: "2024-05-14 16:55", source: "企业上传", visible: "企业成员可见", tags: ["盘查", "排放因子"] },
-  { id: "kb-3", scope: "personal", name: "需求调研清单.docx", type: "word", size: "2.1 MB", updated: "2024-05-14 11:20", source: "个人上传", visible: "仅我可见", tags: ["需求", "访谈"] },
-  { id: "kb-4", scope: "enterprise", name: "系统功能清单.xlsx", type: "excel", size: "36.5 KB", updated: "2024-05-13 09:42", source: "企业上传", visible: "企业成员可见", tags: ["功能", "范围"] },
-  { id: "kb-5", scope: "industry", name: "行业标杆案例集.pdf", type: "pdf", size: "12.8 MB", updated: "2024-05-12 18:30", source: "行业资料库", visible: "团队可调用", tags: ["行业", "案例"] },
-  { id: "kb-6", scope: "personal", name: "项目实施计划.docx", type: "word", size: "1.4 MB", updated: "2024-05-12 14:08", source: "个人上传", visible: "仅我可见", tags: ["实施", "计划"] }
+  { id: "kb-1", name: "ESG碳管理系统解决方案.pptx", type: "ppt", size: "18.6 MB", updated: "2024-05-15 10:28" },
+  { id: "kb-2", name: "企业碳排放现状分析.pdf", type: "pdf", size: "5.2 MB", updated: "2024-05-14 16:55" },
+  { id: "kb-3", name: "需求调研清单.docx", type: "word", size: "2.1 MB", updated: "2024-05-14 11:20" },
+  { id: "kb-4", name: "系统功能清单.xlsx", type: "excel", size: "36.5 KB", updated: "2024-05-13 09:42" },
+  { id: "kb-5", name: "行业标杆案例集.pdf", type: "pdf", size: "12.8 MB", updated: "2024-05-12 18:30" },
+  { id: "kb-6", name: "项目实施计划.docx", type: "word", size: "1.4 MB", updated: "2024-05-12 14:08" }
 ];
 
 const knowledgePreviewSnippets = {
@@ -266,6 +262,19 @@ const knowledgePreviewSnippets = {
   "kb-5": ["行业案例普遍采用组织树、数据连接器、核算模型和可视化看板组合建设。", "减排路径通常结合基准年、情景预测、措施库和边际减排成本排序。", "标杆企业会将供应链 Scope 3 数据作为二期扩展重点。"],
   "kb-6": ["项目计划分为需求确认、详细设计、数据接入、核算配置、联调验收和试运行。", "一期建议控制在核心组织边界、核心排放源和关键报表范围内。", "每个阶段需要明确客户责任人、交付物、评审节点和风险项。"]
 };
+
+const modelPresets = [
+  { id: "minimax-m3", provider: "minimax", label: "MiniMax · MiniMax-M3", model: "MiniMax-M3", baseUrl: "https://api.minimax.chat/v1", apiKeyEnv: "MINIMAX_API_KEY" },
+  { id: "deepseek-chat", provider: "deepseek", label: "DeepSeek · Chat", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1", apiKeyEnv: "DEEPSEEK_API_KEY" },
+  { id: "deepseek-reasoner", provider: "deepseek", label: "DeepSeek · Reasoner", model: "deepseek-reasoner", baseUrl: "https://api.deepseek.com/v1", apiKeyEnv: "DEEPSEEK_API_KEY" },
+  { id: "qwen-plus", provider: "dashscope", label: "Qwen · Plus", model: "qwen-plus", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKeyEnv: "DASHSCOPE_API_KEY" },
+  { id: "qwen-max", provider: "dashscope", label: "Qwen · Max", model: "qwen-max", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKeyEnv: "DASHSCOPE_API_KEY" },
+  { id: "openai-gpt-4.1", provider: "openai", label: "OpenAI · GPT-4.1", model: "gpt-4.1", baseUrl: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" },
+  { id: "openai-gpt-4o", provider: "openai", label: "OpenAI · GPT-4o", model: "gpt-4o", baseUrl: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" },
+  { id: "openai-o3", provider: "openai", label: "OpenAI · o3", model: "o3", baseUrl: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" },
+  { id: "kimi-32k", provider: "moonshot", label: "Kimi · Moonshot v1 32k", model: "moonshot-v1-32k", baseUrl: "https://api.moonshot.cn/v1", apiKeyEnv: "MOONSHOT_API_KEY" },
+  { id: "glm-4", provider: "zhipu", label: "智谱 · GLM-4", model: "glm-4", baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKeyEnv: "ZHIPUAI_API_KEY" }
+];
 
 const todoItems = [
   ["提供企业现有碳数据相关系统清单及接口文档", "李明", "05-20"],
@@ -390,9 +399,8 @@ function pushVpbuddyMessage(text, type = "question") {
 function getKnowledgeDocsForCurrentTab() {
   const query = state.knowledgeSearch.trim().toLowerCase();
   return knowledgeDocs.filter((item) => {
-    if (item.scope !== state.knowledgeTab) return false;
     if (!query) return true;
-    const haystack = [item.name, item.type, item.size, item.updated, item.source, item.visible, ...item.tags].join(" ").toLowerCase();
+    const haystack = [item.name, item.type, item.size, item.updated].join(" ").toLowerCase();
     return haystack.includes(query);
   });
 }
@@ -667,18 +675,45 @@ async function sendVpbuddyChatMessage(text) {
 }
 
 function getSettingsPayload() {
+  const preset = getSelectedModelPreset();
   return {
-    apiKey: state.settings.apiKey.trim(),
+    provider: state.settings.provider,
     model: state.settings.model,
-    endpoint: state.settings.endpoint.trim()
+    base_url: state.settings.endpoint.trim(),
+    api_key: state.settings.apiKey.trim(),
+    api_key_env: state.settings.apiKeyEnv,
+    hermes: {
+      model: state.settings.model,
+      base_url: state.settings.endpoint.trim(),
+      api_key_env: state.settings.apiKeyEnv,
+      openai_compatible: true
+    },
+    preset: preset.id
+  };
+}
+
+function getSelectedModelPreset() {
+  return modelPresets.find((item) => item.id === state.settings.modelPreset) || modelPresets[0];
+}
+
+function applyModelPreset(presetId) {
+  const preset = modelPresets.find((item) => item.id === presetId) || modelPresets[0];
+  state.settings = {
+    ...state.settings,
+    modelPreset: preset.id,
+    provider: preset.provider,
+    model: preset.model,
+    endpoint: preset.baseUrl,
+    apiKeyEnv: preset.apiKeyEnv,
+    status: "idle",
+    message: `Hermes: model=${preset.model}, base_url=${preset.baseUrl}`
   };
 }
 
 function updateSettingsFromInputs() {
   const apiKey = document.querySelector(".settings-api-key")?.value ?? state.settings.apiKey;
-  const model = document.querySelector(".settings-model")?.value ?? state.settings.model;
   const endpoint = document.querySelector(".settings-endpoint")?.value ?? state.settings.endpoint;
-  state.settings = { ...state.settings, apiKey, model, endpoint };
+  state.settings = { ...state.settings, apiKey, endpoint };
 }
 
 async function testAISettings() {
@@ -816,15 +851,6 @@ function saveKnowledgeRename(id) {
   render();
 }
 
-function saveKnowledgeVisibility(id) {
-  const doc = getKnowledgeDocById(id);
-  const visible = document.querySelector(".knowledge-visibility-select")?.value;
-  if (!doc || !visible) return;
-  doc.visible = visible;
-  setToast("可见范围已更新", false);
-  render();
-}
-
 function downloadKnowledgeSource(id) {
   const doc = getKnowledgeDocById(id);
   if (!doc) return;
@@ -832,8 +858,6 @@ function downloadKnowledgeSource(id) {
   const content = [
     doc.name,
     `类型：${doc.type.toUpperCase()}`,
-    `来源：${doc.source}`,
-    `可见范围：${doc.visible}`,
     "",
     ...snippets
   ].join("\n");
@@ -1381,14 +1405,8 @@ function renderKnowledge() {
   const body = `
     <header class="page-header knowledge-head">
       <h1>知识库</h1>
+      <p>共 ${knowledgeDocs.length} 个文档</p>
     </header>
-    <section class="kb-tabs">
-      ${knowledgeTabs.map(([id, label]) => `
-        <button class="${state.knowledgeTab === id ? "active" : ""}" data-action="knowledge-tab" data-tab="${id}">
-          ${label}<em>${knowledgeDocs.filter((item) => item.scope === id).length}</em>
-        </button>
-      `).join("")}
-    </section>
     <section class="knowledge-layout">
       <div class="knowledge-main">
         <div class="kb-toolbar">
@@ -1408,12 +1426,6 @@ function renderKnowledge() {
       </div>
       ${selected ? `<aside class="knowledge-detail panel">
         <header>${docBadge(selected.type)}<div><h2>${selected.name}</h2><p>${selected.type.toUpperCase()} · ${selected.size}</p></div></header>
-        <h3>标签</h3>
-        <div class="tag-list">${selected.tags.map((tag) => `<button data-action="toast" data-message="已按 ${tag} 筛选">${tag}</button>`).join("")}<button data-action="modal" data-modal="add-tag">${icon("plus", 15)}添加标签</button></div>
-        <h3>来源</h3>
-        <p>${icon("upload", 16)}${selected.source}</p>
-        <h3>可见范围</h3>
-        <p>${icon("lock", 16)}${selected.visible}</p>
         <h3>本次会议可调用</h3>
         <p>开启后，AI 在本次会议中可引用该文档内容。</p>
         <div class="knowledge-callable">
@@ -1431,6 +1443,7 @@ function renderKnowledge() {
 }
 
 function renderSettings() {
+  const preset = getSelectedModelPreset();
   const statusClass = state.settings.status === "connected" ? "on" : state.settings.status === "error" ? "off" : "pending";
   const statusText = {
     connected: "已连接",
@@ -1445,9 +1458,14 @@ function renderSettings() {
       <header>${icon("sparkle", 34)}<div><h2>AI 配置</h2><p>配置 AI 模型与接口，驱动智能问答与内容生成</p></div></header>
       <label>API Key <strong>*</strong><textarea class="settings-api-key" placeholder="请输入您的 API Key">${escapeHtml(state.settings.apiKey)}</textarea></label>
       <label>AI 模型 <strong>*</strong><select class="settings-model">
-        ${["GPT-4.1", "GPT-4o", "o3"].map((model) => `<option ${state.settings.model === model ? "selected" : ""}>${model}</option>`).join("")}
+        ${modelPresets.map((item) => `<option value="${item.id}" ${state.settings.modelPreset === item.id ? "selected" : ""}>${item.label}</option>`).join("")}
       </select></label>
-      <label>接口地址（可选）<input class="settings-endpoint" value="${escapeHtml(state.settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label>
+      <label>Base URL <strong>*</strong><input class="settings-endpoint" value="${escapeHtml(state.settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label>
+      <div class="hermes-fields">
+        <span><strong>provider</strong>${preset.provider}</span>
+        <span><strong>model</strong>${state.settings.model}</span>
+        <span><strong>api_key_env</strong>${state.settings.apiKeyEnv}</span>
+      </div>
       <footer>
         <div><i class="status-dot ${statusClass}"></i><strong>${statusText}</strong><p>${state.settings.message}</p></div>
         <button class="ghost" data-action="test-ai-settings">${icon("refresh")}测试连接</button>
@@ -1470,7 +1488,6 @@ function renderActionModal() {
   const selectedDeliverable = deliverables.find((item) => item.id === state.selectedDeliverable) || deliverables[0];
   const selectedKnowledge = getSelectedKnowledgeDoc() || knowledgeDocs[0];
   const selectedKnowledgeCallable = isKnowledgeCallable(selectedKnowledge);
-  const selectedKnowledgeTab = knowledgeTabs.find(([id]) => id === selectedKnowledge.scope) || knowledgeTabs[0];
 
   if (state.modal === "all-followups") {
     return `
@@ -1602,7 +1619,7 @@ function renderActionModal() {
           <header>
             ${docBadge(selectedKnowledge.type)}
             <div>
-              <span>${selectedKnowledgeTab[1]} · ${selectedKnowledge.updated}</span>
+              <span>${selectedKnowledge.updated}</span>
               <h2>知识预览</h2>
               <p>${selectedKnowledge.name}</p>
             </div>
@@ -1610,11 +1627,7 @@ function renderActionModal() {
           <div class="knowledge-preview-meta">
             <em>${selectedKnowledge.type.toUpperCase()}</em>
             <em>${selectedKnowledge.size}</em>
-            <em>${selectedKnowledge.visible}</em>
             <em>${selectedKnowledgeCallable ? "本次会议可调用" : "本次会议不可调用"}</em>
-          </div>
-          <div class="tag-list preview-tags">
-            ${selectedKnowledge.tags.map((tag) => `<button data-action="toast" data-message="已按 ${tag} 筛选">${tag}</button>`).join("")}
           </div>
           <div class="preview-snippets">
             ${snippets.map((text, index) => `
@@ -1653,15 +1666,6 @@ function renderActionModal() {
               </div>
             </section>
             <section>
-              <div>${icon("lock", 18)}<span><strong>调整可见范围</strong><em>当前：${selectedKnowledge.visible}</em></span></div>
-              <div class="knowledge-op-control">
-                <select class="knowledge-visibility-select">
-                  ${["仅我可见", "团队可调用", "企业成员可见"].map((option) => `<option ${selectedKnowledge.visible === option ? "selected" : ""}>${option}</option>`).join("")}
-                </select>
-                <button class="primary compact" data-action="knowledge-visibility-save" data-id="${selectedKnowledge.id}">保存</button>
-              </div>
-            </section>
-            <section>
               <div>${icon("download", 18)}<span><strong>下载源文件</strong><em>${selectedKnowledge.type.toUpperCase()} · ${selectedKnowledge.size}</em></span></div>
               <button class="ghost compact" data-action="knowledge-download" data-id="${selectedKnowledge.id}">下载</button>
             </section>
@@ -1686,9 +1690,8 @@ function renderActionModal() {
     "export-summary": ["导出纪要", "支持导出 DOCX/PDF，并附带会议结论、待办、引用材料和交付物版本。"],
     "share-summary": ["分享归档", "生成只读分享链接，可设置有效期、访问密码和可下载范围。"],
     "upload-knowledge": ["上传知识文档", "上传后调用 POST /knowledge/documents，后端解析、切片、向量化并返回可用状态。"],
-    "add-tag": ["添加标签", "为当前知识文档追加标签，调用 POST /knowledge/documents/:id/tags。"],
-    "knowledge-preview": ["知识预览", "预览当前文档的解析文本、切片、标签和可被本次会议调用的范围。"],
-    "knowledge-more": ["知识更多操作", "包含重命名、可见范围调整和源文件下载。"]
+    "knowledge-preview": ["知识预览", "预览当前文档的解析文本、切片和可被本次会议调用的状态。"],
+    "knowledge-more": ["知识更多操作", "包含重命名和源文件下载。"]
   };
   const [title, body] = map[state.modal] || ["操作", "该操作已接入前端反馈，后续可替换为真实接口调用。"];
   return `
@@ -1962,11 +1965,6 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "stage-tab") state.stageTab = target.dataset.tab;
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
-  if (action === "knowledge-tab") {
-    state.knowledgeTab = target.dataset.tab;
-    const firstDoc = knowledgeDocs.find((item) => item.scope === state.knowledgeTab);
-    if (firstDoc) state.selectedKnowledge = firstDoc.id;
-  }
   if (action === "knowledge-select") state.selectedKnowledge = target.dataset.id;
   if (action === "toggle-knowledge-callable") {
     const doc = knowledgeDocs.find((item) => item.id === target.dataset.id) || getSelectedKnowledgeDoc();
@@ -1975,27 +1973,8 @@ document.addEventListener("click", async (event) => {
     state.knowledgeCallable[doc.id] = next;
     setToast(next ? "已开启本次会议可调用" : "已关闭本次会议可调用", false);
   }
-  if (action === "knowledge-op") {
-    const doc = knowledgeDocs.find((item) => item.id === target.dataset.id) || getSelectedKnowledgeDoc();
-    state.selectedKnowledge = doc.id;
-    const op = target.dataset.op;
-    if (op === "preview") {
-      state.modal = "knowledge-preview";
-    } else {
-      const labelMap = {
-        rename: "已进入重命名流程",
-        visibility: "已打开可见范围设置",
-        download: "原文件已加入下载队列"
-      };
-      setToast(`${doc.name}：${labelMap[op] || "操作已触发"}`, false);
-    }
-  }
   if (action === "knowledge-rename-save") {
     saveKnowledgeRename(target.dataset.id);
-    return;
-  }
-  if (action === "knowledge-visibility-save") {
-    saveKnowledgeVisibility(target.dataset.id);
     return;
   }
   if (action === "knowledge-download") {
@@ -2098,7 +2077,7 @@ document.addEventListener("input", (event) => {
     render();
     return;
   }
-  if (event.target.matches(".settings-api-key, .settings-model, .settings-endpoint")) {
+  if (event.target.matches(".settings-api-key, .settings-endpoint")) {
     updateSettingsFromInputs();
     return;
   }
@@ -2115,6 +2094,8 @@ document.addEventListener("input", (event) => {
 document.addEventListener("change", async (event) => {
   if (event.target.matches(".settings-model")) {
     updateSettingsFromInputs();
+    applyModelPreset(event.target.value);
+    render();
     return;
   }
   if (!event.target.matches(".native-file-input")) return;
@@ -2123,7 +2104,16 @@ document.addEventListener("change", async (event) => {
   const names = files.map((file) => file.name).join("、");
   if (state.fileUploadContext === "vpbuddy-material") {
     pushVpbuddyMessage(`发送材料：${names}`, "material");
-    setToast("材料已选择并发送给 VPBuddy");
+    const results = await Promise.allSettled(
+      files.map((file) => api.sendChatAttachment(
+        state.selectedMeetingId,
+        file,
+        `发送材料给 VPBuddy：${file.name}。请结合当前会议记录和材料内容分析。`
+      ))
+    );
+    const succeeded = results.some((item) => item.status === "fulfilled");
+    setApiStatus(succeeded ? "connected" : "mock", succeeded ? "已连接后端" : "后端未连接或材料格式暂不支持");
+    setToast(succeeded ? `材料已发送给 VPBuddy：${names}` : `材料已加入本地记录：${names}，后端可用后再同步`);
   } else if (state.fileUploadContext === "knowledge") {
     const results = await Promise.allSettled(files.map((file) => api.uploadKnowledgeDocument(file, { meetingId: state.selectedMeetingId })));
     const succeeded = results.some((item) => item.status === "fulfilled");

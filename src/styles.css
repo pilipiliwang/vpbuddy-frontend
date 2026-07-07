@@ -2887,6 +2887,30 @@ textarea::placeholder {
   height: 60px;
 }
 
+.hermes-fields {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.hermes-fields span {
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(44, 104, 194, 0.42);
+  background: rgba(2, 13, 34, 0.44);
+  color: #c4d0e5;
+  overflow-wrap: anywhere;
+}
+
+.hermes-fields strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #75bbff;
+  font-size: 13px;
+}
+
 .settings-card footer {
   margin-top: 26px;
   padding-top: 22px;
@@ -3106,10 +3130,6 @@ textarea::placeholder {
   color: #c8d8ef;
   font-style: normal;
   font-size: 13px;
-}
-
-.preview-tags {
-  margin: 8px 0 16px;
 }
 
 .preview-snippets {
