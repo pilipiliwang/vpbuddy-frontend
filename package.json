@@ -11,8 +11,8 @@
     "desktop": "electron .",
     "desktop:dir": "electron-builder --dir",
     "desktop:build": "npm run desktop:build:win",
-    "desktop:build:win": "electron-builder --win nsis portable",
-    "desktop:build:mac": "electron-builder --mac dmg zip"
+    "desktop:build:win": "electron-builder --win nsis portable --x64 --publish never",
+    "desktop:build:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never"
   },
   "devDependencies": {
     "electron": "^43.0.0",
