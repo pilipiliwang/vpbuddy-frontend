@@ -83,13 +83,13 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
     updatePresentationState: (meetingId, input) =>
       request(`/meetings/${meetingId}/presentation-state`, { method: "PATCH", body: JSON.stringify(input) }),
     captureStageSnapshot: (meetingId) => request(`/meetings/${meetingId}/stage/snapshots`, { method: "POST" }),
-    listMaterials: (meetingId) => request(`/meetings/${meetingId}/materials`),
-    getMaterial: (materialId) => request(`/materials/${materialId}`),
+    listMaterials: (meetingId) => request(`/api/meetings/${meetingId}/materials`),
+    getMaterial: (materialId) => request(`/api/materials/${materialId}`),
     listMaterialVersions: (materialId) => request(`/materials/${materialId}/versions`),
     uploadMaterial: (meetingId, file) => {
       const data = new FormData();
       data.append("file", file);
-      return request(`/meetings/${meetingId}/materials`, {
+      return request(`/api/meetings/${meetingId}/materials`, {
         method: "POST",
         body: data,
         headers: {},

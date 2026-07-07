@@ -2105,11 +2105,17 @@ document.addEventListener("change", async (event) => {
   if (state.fileUploadContext === "vpbuddy-material") {
     pushVpbuddyMessage(`发送材料：${names}`, "material");
     const results = await Promise.allSettled(
-      files.map((file) => api.sendChatAttachment(
-        state.selectedMeetingId,
-        file,
-        `发送材料给 VPBuddy：${file.name}。请结合当前会议记录和材料内容分析。`
-      ))
+      files.map(async (file) => {
+        try {
+          return await api.uploadMaterial(state.selectedMeetingId, file);
+        } catch (error) {
+          return api.sendChatAttachment(
+            state.selectedMeetingId,
+            file,
+            `发送材料给 VPBuddy：${file.name}。请结合当前会议记录和材料内容分析。`
+          );
+        }
+      })
     );
     const succeeded = results.some((item) => item.status === "fulfilled");
     setApiStatus(succeeded ? "connected" : "mock", succeeded ? "已连接后端" : "后端未连接或材料格式暂不支持");
