@@ -2,9 +2,61 @@
   "name": "vpbuddy-frontend",
   "version": "0.1.0",
   "private": true,
+  "description": "VPBuddy desktop shell and frontend",
   "type": "module",
+  "main": "desktop/main.cjs",
   "scripts": {
     "dev": "node server.mjs",
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "desktop": "electron .",
+    "desktop:dir": "electron-builder --dir",
+    "desktop:build": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.vpbuddy.desktop",
+    "productName": "VPBuddy",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "index.html",
+      "desktop-config.js",
+      "server.mjs",
+      "desktop/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "VPBuddy"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    }
   }
 }
