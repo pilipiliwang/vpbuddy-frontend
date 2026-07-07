@@ -48,7 +48,9 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
     const payload = await readJsonResponse(response);
 
     if (!response.ok) {
-      const message = payload?.error || payload?.message || payload || `VPBuddy API error: ${response.status}`;
+      const message = payload?.error
+        || payload?.message
+        || (typeof payload === "string" ? payload : payload ? JSON.stringify(payload) : `VPBuddy API error: ${response.status}`);
       throw new Error(message);
     }
 
@@ -59,24 +61,24 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
   return {
     baseUrl: root,
     eventsUrl: (meetingId) => buildUrl(`/api/meetings/${meetingId}/events`),
-    login: (input) => request("/auth/login", { method: "POST", body: JSON.stringify(input) }),
-    startSso: (input) => request("/auth/sso/start", { method: "POST", body: JSON.stringify(input) }),
-    completeSso: (input) => request("/auth/sso/complete", { method: "POST", body: JSON.stringify(input) }),
-    requestPasswordReset: (input) => request("/auth/password-reset", { method: "POST", body: JSON.stringify(input) }),
-    me: () => request("/auth/me"),
-    getDeviceStatus: () => request("/client/device-status"),
+    login: (input) => request("/api/auth/login", { method: "POST", body: JSON.stringify(input) }),
+    startSso: (input) => request("/api/auth/sso/start", { method: "POST", body: JSON.stringify(input) }),
+    completeSso: (input) => request("/api/auth/sso/complete", { method: "POST", body: JSON.stringify(input) }),
+    requestPasswordReset: (input) => request("/api/auth/password-reset", { method: "POST", body: JSON.stringify(input) }),
+    me: () => request("/api/auth/me"),
+    getDeviceStatus: () => request("/api/client/device-status"),
     listDevices: () => request("/client/devices"),
     getWorkspaceStorage: () => request("/workspace/storage"),
-    listMeetings: () => request("/meetings"),
+    listMeetings: () => request("/api/meetings"),
     createMeeting: (input = {}) => {
       const query = input.meetingId || input.meeting_id ? `?meeting_id=${encodeURIComponent(input.meetingId || input.meeting_id)}` : "";
-      return request(`/api/meetings/stream_start${query}`, { method: "POST" });
+      return request(`/api/meetings/stream_start${query}`, { method: "POST", body: JSON.stringify(input) });
     },
-    getMeeting: (id) => request(`/meetings/${id}`),
-    startRecording: (meetingId) => request(`/meetings/${meetingId}/recording/start`, { method: "POST" }),
-    stopRecording: (meetingId) => request(`/meetings/${meetingId}/recording/stop`, { method: "POST" }),
+    getMeeting: (id) => request(`/api/meetings/${id}`),
+    startRecording: (meetingId) => request(`/api/meetings/stream_start?meeting_id=${encodeURIComponent(meetingId)}`, { method: "POST" }),
+    stopRecording: (meetingId) => request(`/api/meetings/${meetingId}/stream_stop`, { method: "POST" }),
     listMeetingEvents: (meetingId) => request(`/api/meetings/${meetingId}/events`),
-    listTranscriptSegments: (meetingId) => request(`/meetings/${meetingId}/transcript-segments`),
+    listTranscriptSegments: (meetingId) => request(`/api/meetings/${meetingId}/state`),
     getPresentationState: (meetingId) => request(`/meetings/${meetingId}/presentation-state`),
     openInStage: (meetingId, input) =>
       request(`/meetings/${meetingId}/stage/open`, { method: "POST", body: JSON.stringify(input) }),
@@ -119,61 +121,58 @@ export function createVpbuddyApi({ baseUrl = "", getToken, transport = fetch, ti
       });
     },
     listChatHistory: (meetingId) => request(`/api/meetings/${meetingId}/chat/history`),
-    listDeliverables: (meetingId) => request(`/meetings/${meetingId}/deliverables`),
+    listDeliverables: (meetingId) => request(`/api/meetings/${meetingId}/docs`),
     getDeliverable: (deliverableId) => request(`/deliverables/${deliverableId}`),
     listDeliverableVersions: (deliverableId) => request(`/deliverables/${deliverableId}/versions`),
     updateDeliverableVersion: (deliverableId, version) =>
       request(`/deliverables/${deliverableId}/version`, { method: "PATCH", body: JSON.stringify({ version }) }),
-    archiveMeeting: (meetingId) => request(`/meetings/${meetingId}/archive`, { method: "POST" }),
-    listKnowledge: (meetingId) => request(`/api/kb/list${meetingId ? `?meeting_id=${encodeURIComponent(meetingId)}` : ""}`),
+    archiveMeeting: (meetingId) => request(`/api/meetings/${meetingId}/close`, { method: "POST" }),
+    listKnowledge: () => request("/api/kb/list"),
     searchKnowledge: (input) =>
       request("/api/kb/search", { method: "POST", body: JSON.stringify(input) }),
-    listKnowledgeDocuments: (meetingId) =>
-      request(`/api/kb/list${meetingId ? `?meeting_id=${encodeURIComponent(meetingId)}` : ""}`),
-    uploadKnowledgeDocument: (file, metadata) => {
+    listKnowledgeDocuments: () => request("/api/kb/list"),
+    uploadKnowledgeDocument: (file) => {
       const data = new FormData();
       data.append("file", file);
-      const meetingId = metadata?.meetingId || metadata?.meeting_id;
-      const query = meetingId ? `?meeting_id=${encodeURIComponent(meetingId)}` : "";
-      return request(`/api/kb/upload${query}`, { method: "POST", body: data, timeoutMs: 15000 });
+      return request("/api/kb/upload", { method: "POST", body: data, timeoutMs: 15000 });
     },
-    saveAISettings: (input) => request("/settings/ai", { method: "PUT", body: JSON.stringify(input) }),
-    testAIConnection: (input) => request("/settings/ai/test", { method: "POST", body: JSON.stringify(input) })
+    saveAISettings: (input) => request("/api/settings/ai", { method: "PUT", body: JSON.stringify(input) }),
+    testAIConnection: (input) => request("/api/settings/ai/test", { method: "POST", body: JSON.stringify(input) })
   };
 }
 
 export const endpoints = {
   auth: {
-    login: "POST /auth/login",
-    ssoStart: "POST /auth/sso/start",
-    ssoComplete: "POST /auth/sso/complete",
-    passwordReset: "POST /auth/password-reset",
-    me: "GET /auth/me"
+    login: "POST /api/auth/login",
+    ssoStart: "POST /api/auth/sso/start",
+    ssoComplete: "POST /api/auth/sso/complete",
+    passwordReset: "POST /api/auth/password-reset",
+    me: "GET /api/auth/me"
   },
   client: {
-    deviceStatus: "GET /client/device-status",
+    deviceStatus: "GET /api/client/device-status",
     devices: "GET /client/devices",
     storage: "GET /workspace/storage"
   },
   meetings: {
-    list: "GET /meetings",
+    list: "GET /api/meetings",
     create: "POST /api/meetings/stream_start",
-    detail: "GET /meetings/:id",
-    startRecording: "POST /meetings/:id/recording/start",
-    stopRecording: "POST /meetings/:id/recording/stop",
+    detail: "GET /api/meetings/:id",
+    startRecording: "POST /api/meetings/stream_start?meeting_id=:id",
+    stopRecording: "POST /api/meetings/:id/stream_stop",
     events: "GET /api/meetings/:id/events",
-    transcript: "GET /meetings/:id/transcript-segments",
+    transcript: "GET /api/meetings/:id/state",
     presentationState: "GET/PATCH /meetings/:id/presentation-state",
     openStage: "POST /meetings/:id/stage/open",
     snapshot: "POST /meetings/:id/stage/snapshots",
     appendEvent: "POST /meetings/:id/events",
-    archive: "POST /meetings/:id/archive"
+    archive: "POST /api/meetings/:id/close"
   },
   materials: {
-    list: "GET /meetings/:id/materials",
-    detail: "GET /materials/:id",
+    list: "GET /api/meetings/:id/materials",
+    detail: "GET /api/materials/:id",
     versions: "GET /materials/:id/versions",
-    upload: "POST /meetings/:id/materials",
+    upload: "POST /api/meetings/:id/materials",
     visibility: "PATCH /materials/:id/visibility",
     annotations: "POST /materials/:id/annotations"
   },
@@ -184,26 +183,26 @@ export const endpoints = {
     kbSearch: "POST /api/kb/search"
   },
   deliverables: {
-    list: "GET /meetings/:id/deliverables",
+    list: "GET /api/meetings/:id/docs",
     detail: "GET /deliverables/:id",
     generate: "POST /meetings/:id/deliverables/generate",
     versions: "GET /deliverables/:id/versions",
     version: "PATCH /deliverables/:id/version"
   },
   knowledge: {
-    list: "GET /api/kb/list?meeting_id=:id",
+    list: "GET /api/kb/list",
     search: "POST /api/kb/search",
-    upload: "POST /api/kb/upload?meeting_id=:id",
+    upload: "POST /api/kb/upload",
     tags: "POST /knowledge/documents/:id/tags",
     meetingCallable: "PATCH /knowledge/documents/:id/meeting-callable"
   },
   archive: {
-    archive: "POST /meetings/:id/archive",
+    archive: "POST /api/meetings/:id/close",
     export: "POST /meetings/:id/archive/export",
     shareLink: "POST /meetings/:id/share-links"
   },
   settings: {
-    saveAI: "PUT /settings/ai",
-    testAI: "POST /settings/ai/test"
+    saveAI: "PUT /api/settings/ai",
+    testAI: "POST /api/settings/ai/test"
   }
 };

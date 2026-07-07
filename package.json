@@ -10,7 +10,9 @@
     "start": "node server.mjs",
     "desktop": "electron .",
     "desktop:dir": "electron-builder --dir",
-    "desktop:build": "electron-builder --win nsis portable"
+    "desktop:build": "npm run desktop:build:win",
+    "desktop:build:win": "electron-builder --win nsis portable",
+    "desktop:build:mac": "electron-builder --mac dmg zip"
   },
   "devDependencies": {
     "electron": "^43.0.0",
@@ -25,12 +27,32 @@
     "files": [
       "index.html",
       "desktop-config.js",
-      "server.mjs",
       "desktop/**/*",
       "src/**/*",
       "assets/**/*",
       "package.json"
     ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
     "win": {
       "target": [
         {

@@ -1,7 +1,8 @@
 import { createVpbuddyApi } from "./api/client.js";
 
 const app = document.querySelector("#app");
-const apiBaseUrl = window.VPBUDDY_API_BASE_URL || window.localStorage?.getItem("vpbuddy.apiBaseUrl") || "http://127.0.0.1:8765";
+const defaultApiBaseUrl = "http://47.100.182.3:28765";
+const apiBaseUrl = window.localStorage?.getItem("vpbuddy.apiBaseUrl") || window.VPBUDDY_API_BASE_URL || defaultApiBaseUrl;
 const api = createVpbuddyApi({ baseUrl: apiBaseUrl });
 
 const state = {
@@ -28,6 +29,10 @@ const state = {
   fileUploadContext: "material",
   knowledgeCallable: {},
   knowledgeSearch: "",
+  knowledgeLoaded: false,
+  knowledgeTotal: null,
+  knowledgeMessage: "",
+  apiBaseUrl,
   settings: {
     apiKey: "",
     modelPreset: "minimax-m3",
@@ -473,6 +478,49 @@ function normalizeMeetingsResponse(payload) {
   return list.map(normalizeMeeting);
 }
 
+function normalizeMaterialType(value) {
+  const type = String(value || "").toLowerCase();
+  if (["ppt", "pptx", "presentation"].includes(type)) return "ppt";
+  if (["doc", "docx", "word"].includes(type)) return "word";
+  if (["xls", "xlsx", "excel"].includes(type)) return "excel";
+  if (["png", "jpg", "jpeg", "webp", "image"].includes(type)) return "image";
+  if (type === "pdf") return "pdf";
+  return type || "demo";
+}
+
+function normalizeMaterial(raw, index = 0) {
+  const name = raw.name || raw.filename || raw.title || `Material ${index + 1}`;
+  return {
+    id: raw.id || raw.material_id || `mat-${index + 1}`,
+    name,
+    type: normalizeMaterialType(raw.type || raw.file_type || name.split(".").pop()),
+    size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || 0)),
+    time: raw.time || raw.created_at || raw.createdAt || raw.updated_at || nowTime(),
+    version: raw.version || "V1.0"
+  };
+}
+
+function normalizeMaterialsResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.materials || payload?.items || payload?.data || [];
+  return list.map(normalizeMaterial);
+}
+
+function normalizeKnowledgeDoc(raw, index = 0) {
+  const name = raw.name || raw.filename || raw.title || raw.doc_id || raw.id || `Knowledge ${index + 1}`;
+  return {
+    id: raw.id || raw.doc_id || raw.document_id || `kb-${index + 1}`,
+    name,
+    type: normalizeMaterialType(raw.type || raw.file_type || raw.kind || name.split(".").pop()),
+    size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || raw.bytes || 0)),
+    updated: raw.updated || raw.updated_at || raw.created_at || raw.createdAt || ""
+  };
+}
+
+function normalizeKnowledgeResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.documents || payload?.files || payload?.items || payload?.data || [];
+  return list.map(normalizeKnowledgeDoc);
+}
+
 function secondsToTime(seconds) {
   if (!Number.isFinite(Number(seconds))) return nowTime();
   const total = Math.max(0, Math.floor(Number(seconds)));
@@ -552,16 +600,32 @@ function setApiStatus(status, message) {
   state.apiMessage = message;
 }
 
+function hasBackendSession() {
+  return state.apiStatus === "connected" || state.apiStatus === "loading";
+}
+
+function shouldUseDemoData() {
+  return !hasBackendSession();
+}
+
+function renderEmptyState(title, description = "", modifier = "") {
+  return `
+    <div class="empty-state ${modifier}">
+      <strong>${title}</strong>
+      ${description ? `<p>${description}</p>` : ""}
+    </div>
+  `;
+}
+
 async function loadMeetingsFromBackend() {
   setApiStatus("loading", "连接后端中");
   render();
   try {
     const payload = await api.listMeetings();
     const next = normalizeMeetingsResponse(payload);
-    if (next.length) {
-      replaceArray(meetings, next);
-      if (!meetings.some((item) => item.id === state.selectedMeetingId)) state.selectedMeetingId = meetings[0].id;
-    }
+    replaceArray(meetings, next);
+    if (meetings.length && !meetings.some((item) => item.id === state.selectedMeetingId)) state.selectedMeetingId = meetings[0].id;
+    if (!meetings.length) state.selectedMeetingId = "";
     setApiStatus("connected", "已连接后端");
   } catch (error) {
     setApiStatus("mock", "后端未连接，使用演示数据");
@@ -573,12 +637,16 @@ async function loadMeetingDetailFromBackend(meetingId) {
   const results = await Promise.allSettled([
     api.getMeeting(meetingId),
     api.listTranscriptSegments(meetingId),
+    api.listMaterials(meetingId),
     api.listDeliverables(meetingId),
     api.listChatHistory(meetingId)
   ]);
 
   let connected = false;
-  const [detail, transcript, deliverableList, chatHistory] = results;
+  let detailHadTranscripts = false;
+  let detailHadDeliverables = false;
+  let detailHadMaterials = false;
+  const [detail, transcript, materialList, deliverableList, chatHistory] = results;
 
   if (detail.status === "fulfilled" && detail.value) {
     connected = true;
@@ -587,35 +655,97 @@ async function loadMeetingDetailFromBackend(meetingId) {
     if (index >= 0) meetings[index] = { ...meetings[index], ...meeting, id: meetingId };
 
     const detailTranscripts = normalizeTranscriptResponse(detail.value);
-    if (detailTranscripts.length) replaceArray(meetingRecords, detailTranscripts);
+    if (detailTranscripts.length) {
+      detailHadTranscripts = true;
+      replaceArray(meetingRecords, detailTranscripts);
+    }
 
     const detailDeliverables = normalizeDeliverablesResponse(detail.value);
-    if (detailDeliverables.length) replaceArray(deliverables, detailDeliverables);
+    if (detailDeliverables.length) {
+      detailHadDeliverables = true;
+      replaceArray(deliverables, detailDeliverables);
+    }
+
+    const detailMaterials = normalizeMaterialsResponse(detail.value);
+    if (detailMaterials.length) {
+      detailHadMaterials = true;
+      replaceArray(materials, detailMaterials);
+    }
   }
 
   if (transcript.status === "fulfilled") {
     connected = true;
     const nextRecords = normalizeTranscriptResponse(transcript.value);
-    if (nextRecords.length) replaceArray(meetingRecords, nextRecords);
+    replaceArray(meetingRecords, nextRecords);
   }
 
   if (deliverableList.status === "fulfilled") {
     connected = true;
     const nextDeliverables = normalizeDeliverablesResponse(deliverableList.value);
-    if (nextDeliverables.length) replaceArray(deliverables, nextDeliverables);
+    replaceArray(deliverables, nextDeliverables);
+  }
+
+  if (materialList.status === "fulfilled") {
+    connected = true;
+    const nextMaterials = normalizeMaterialsResponse(materialList.value);
+    replaceArray(materials, nextMaterials);
   }
 
   if (chatHistory.status === "fulfilled") {
     connected = true;
     const history = Array.isArray(chatHistory.value) ? chatHistory.value : chatHistory.value?.messages || chatHistory.value?.history || [];
     const messages = history.map(normalizeChatMessage).filter((item) => item.text);
-    if (messages.length) {
-      replaceArray(state.vpbuddyMessages, messages.reverse());
-      state.showComposerHistory = true;
+    replaceArray(state.vpbuddyMessages, messages.reverse());
+    state.showComposerHistory = messages.length > 0;
+  }
+
+  if (connected) {
+    if (transcript.status !== "fulfilled" && !detailHadTranscripts) replaceArray(meetingRecords, []);
+    if (deliverableList.status !== "fulfilled" && !detailHadDeliverables) replaceArray(deliverables, []);
+    if (materialList.status !== "fulfilled" && !detailHadMaterials) replaceArray(materials, []);
+    if (chatHistory.status !== "fulfilled") {
+      replaceArray(state.vpbuddyMessages, []);
+      state.showComposerHistory = false;
     }
   }
 
   setApiStatus(connected ? "connected" : "mock", connected ? "已连接后端" : "后端未连接，使用演示数据");
+  render();
+}
+
+async function loadKnowledgeFromBackend() {
+  const previousApiStatus = state.apiStatus;
+  setApiStatus("loading", "同步知识库中");
+  state.knowledgeMessage = "";
+  render();
+  try {
+    const payload = await api.listKnowledgeDocuments(state.selectedMeetingId);
+    const nextDocs = normalizeKnowledgeResponse(payload);
+    replaceArray(knowledgeDocs, nextDocs);
+    state.knowledgeLoaded = true;
+    state.knowledgeTotal = Number.isFinite(Number(payload?.total)) ? Number(payload.total) : nextDocs.length;
+    state.knowledgeMessage = nextDocs.length
+      ? ""
+      : state.knowledgeTotal > 0
+        ? `后端知识库共有 ${state.knowledgeTotal} 个文档，但当前 /api/kb/list 尚未返回文档明细。`
+        : "后端知识库当前没有文档。";
+    state.selectedKnowledge = nextDocs[0]?.id || "";
+    setApiStatus("connected", "已连接后端");
+  } catch (error) {
+    if (previousApiStatus === "connected") {
+      replaceArray(knowledgeDocs, []);
+      state.selectedKnowledge = "";
+      state.knowledgeLoaded = true;
+      state.knowledgeTotal = 0;
+      state.knowledgeMessage = "后端知识库接口请求失败，当前不展示演示文档。";
+      setApiStatus("connected", "已连接后端，知识库接口异常");
+    } else {
+      state.knowledgeLoaded = false;
+      state.knowledgeTotal = null;
+      state.knowledgeMessage = "后端知识库未连接，显示演示数据。";
+      setApiStatus("mock", "后端未连接，使用演示数据");
+    }
+  }
   render();
 }
 
@@ -714,6 +844,24 @@ function updateSettingsFromInputs() {
   const apiKey = document.querySelector(".settings-api-key")?.value ?? state.settings.apiKey;
   const endpoint = document.querySelector(".settings-endpoint")?.value ?? state.settings.endpoint;
   state.settings = { ...state.settings, apiKey, endpoint };
+}
+
+function updateBackendApiBaseFromInput() {
+  const value = document.querySelector(".settings-api-base")?.value?.trim();
+  if (value !== undefined) state.apiBaseUrl = value;
+}
+
+function saveBackendApiBase() {
+  const value = state.apiBaseUrl.trim();
+  if (!/^https?:\/\//i.test(value)) {
+    setToast("后端 API 地址必须以 http:// 或 https:// 开头", false);
+    render();
+    return;
+  }
+  window.localStorage?.setItem("vpbuddy.apiBaseUrl", value.replace(/\/$/, ""));
+  setToast("后端 API 地址已保存，正在刷新客户端", false);
+  render();
+  window.setTimeout(() => window.location.reload(), 600);
 }
 
 async function testAISettings() {
@@ -951,7 +1099,13 @@ function renderWorkspace() {
       <button class="primary" data-action="open-create">${icon("plus")}新建会议</button>
     </header>
     <section class="meeting-grid">
-      ${meetings.map(renderMeetingCard).join("")}
+      ${meetings.length
+        ? meetings.map(renderMeetingCard).join("")
+        : renderEmptyState(
+            "暂无会议",
+            hasBackendSession() ? "后端当前没有会议数据。点击新建会议可以创建一条真实会议。" : "暂无演示会议数据。",
+            "meeting-empty"
+          )}
     </section>
     ${state.showCreate ? renderCreateModal() : ""}
   `;
@@ -1079,12 +1233,18 @@ function renderMaterialsList() {
   return `
     <button class="primary wide upload-button" data-action="open-upload" data-context="material">${icon("upload")}上传材料</button>
     <div class="material-stack">
-      ${materials.map((item, index) => `
-        <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${item.id}" title="单击选中，双击投屏">
-          ${docBadge(item.type)}
-          <span><strong>${item.name}</strong><em>${item.size}</em></span>
-        </button>
-      `).join("")}
+      ${materials.length
+        ? materials.map((item, index) => `
+          <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${item.id}" title="单击选中，双击投屏">
+            ${docBadge(item.type)}
+            <span><strong>${item.name}</strong><em>${item.size}</em></span>
+          </button>
+        `).join("")
+        : renderEmptyState(
+            "暂无本次会议材料",
+            hasBackendSession() ? "后端已连接，但当前会议没有材料记录。上传成功后这里会显示会议级材料。" : "暂无演示材料。",
+            "stack-empty"
+          )}
     </div>
   `;
 }
@@ -1097,20 +1257,34 @@ function renderMeetingRecords() {
         <button data-action="toast" data-message="会议记录已同步到最新">${icon("refresh", 16)}同步</button>
       </header>
       <div class="record-stream">
-        ${meetingRecords.map((item) => `
-          <article class="record-item ${item.tone}">
-            <div>
-              <header><strong>${item.speaker}</strong><em>${item.role}</em><time>${item.time}</time></header>
-              <p>${item.text}</p>
-            </div>
-          </article>
-        `).join("")}
+        ${meetingRecords.length
+          ? meetingRecords.map((item) => `
+            <article class="record-item ${item.tone}">
+              <div>
+                <header><strong>${item.speaker}</strong><em>${item.role}</em><time>${item.time}</time></header>
+                <p>${item.text}</p>
+              </div>
+            </article>
+          `).join("")
+          : renderEmptyState(
+              "暂无转写记录",
+              hasBackendSession() ? "等待后端 ASR 写入说话人、时间和内容分段。" : "暂无演示转写记录。",
+              "stack-empty"
+            )}
       </div>
     </section>
   `;
 }
 
 function renderUnderstanding() {
+  if (hasBackendSession() && !meetingRecords.length) {
+    return renderEmptyState(
+      "暂无会议理解数据",
+      "后端尚未返回会议记录或理解结果；有转写分段后再展示诉求、待确认和已确认事项。",
+      "understanding-empty"
+    );
+  }
+
   const groups = [
     ["用户核心诉求", "blue", ["碳排放数据统一管理", "多组织多层级统计", "可视化看板与报告"]],
     ["待确认事项", "yellow", ["数据采集频率", "是否支持多国/欧盟Scope 3", "减排路径模型选型"]],
@@ -1281,45 +1455,68 @@ function renderVpbuddyComposer() {
 }
 
 function renderAIPanel() {
+  const followups = shouldUseDemoData() ? aiFollowupQuestions : [];
+  const explanations = shouldUseDemoData() ? explanationFindings : [];
   return `
     <aside class="ai-panel panel">
       <h2>AI 协同</h2>
       <section class="ai-box">
-        <div class="box-title">${icon("sparkle")}<strong>AI反问</strong><button data-action="toast" data-message="已根据会议记录重新生成反问建议">${icon("refresh", 16)}刷新</button></div>
+        <div class="box-title">${icon("sparkle")}<strong>AI反问</strong><button data-action="toast" data-message="${hasBackendSession() ? "后端暂未提供 AI 反问刷新接口" : "已根据会议记录重新生成反问建议"}">${icon("refresh", 16)}刷新</button></div>
         <div class="followup-list">
-          ${aiFollowupQuestions.slice(0, 3).map((item) => `
-            <button class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${item.id}">
-              ${icon("bot", 16)}
-              <span>
-                <strong>${item.question}</strong>
-                <em>${item.time} · 面向 ${item.target} · ${item.status}</em>
-                <i>${item.reason}</i>
-              </span>
-            </button>
-          `).join("")}
+          ${followups.length
+            ? followups.slice(0, 3).map((item) => `
+              <button class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${item.id}">
+                ${icon("bot", 16)}
+                <span>
+                  <strong>${item.question}</strong>
+                  <em>${item.time} · 面向 ${item.target} · ${item.status}</em>
+                  <i>${item.reason}</i>
+                </span>
+              </button>
+            `).join("")
+            : renderEmptyState(
+                "暂无 AI 反问",
+                hasBackendSession() ? "后端尚未提供反问列表接口，或当前会议还没有生成反问结果。" : "暂无演示反问。",
+                "compact-empty"
+              )}
         </div>
-        <button class="link-more" data-action="modal" data-modal="all-followups">查看全部 AI 反问 ${icon("arrowRight", 16)}</button>
+        ${followups.length ? `<button class="link-more" data-action="modal" data-modal="all-followups">查看全部 AI 反问 ${icon("arrowRight", 16)}</button>` : ""}
       </section>
       <section class="explain-box">
         <div class="box-title">${icon("file")}<strong>解释材料</strong></div>
         <div class="explanation-list">
-          ${explanationFindings.map((item) => `
-            <button class="explanation-row ${state.selectedExplanation === item.id ? "active" : ""}" data-action="open-explanation" data-id="${item.id}">
-              <time>${item.time}</time>
-              <span class="${item.status.includes("需") ? "pending" : "done"}">${item.status}</span>
-              <strong>${item.title}</strong>
-              <p>${item.summary}</p>
-              <em>${item.lookupTargets.join(" / ")}</em>
-            </button>
-          `).join("")}
+          ${explanations.length
+            ? explanations.map((item) => `
+              <button class="explanation-row ${state.selectedExplanation === item.id ? "active" : ""}" data-action="open-explanation" data-id="${item.id}">
+                <time>${item.time}</time>
+                <span class="${item.status.includes("需") ? "pending" : "done"}">${item.status}</span>
+                <strong>${item.title}</strong>
+                <p>${item.summary}</p>
+                <em>${item.lookupTargets.join(" / ")}</em>
+              </button>
+            `).join("")
+            : renderEmptyState(
+                "暂无解释材料",
+                hasBackendSession() ? "后端尚未提供会议概念检索和解释材料接口；当前不展示静态样例。" : "暂无演示解释材料。",
+                "compact-empty"
+              )}
         </div>
-        <button class="link-more" data-action="modal" data-modal="all-explanations">查看全部解释材料 ${icon("arrowRight", 16)}</button>
+        ${explanations.length ? `<button class="link-more" data-action="modal" data-modal="all-explanations">查看全部解释材料 ${icon("arrowRight", 16)}</button>` : ""}
       </section>
     </aside>
   `;
 }
 
 function renderTimeline() {
+  if (hasBackendSession()) {
+    return `
+      <section class="timeline panel">
+        <h2>${icon("calendar")}会议时间线</h2>
+        ${renderEmptyState("暂无会议时间线", "后端尚未提供会议事件时间线接口；当前不展示演示时间线。", "timeline-empty")}
+      </section>
+    `;
+  }
+
   return `
     <section class="timeline panel">
       <h2>${icon("calendar")}会议时间线</h2>
@@ -1339,6 +1536,58 @@ function renderTimeline() {
 
 function renderSummary() {
   const meeting = getSelectedMeeting();
+  if (hasBackendSession()) {
+    return `
+      <main class="summary-page">
+        <header class="summary-header">
+          <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
+          <h1>${escapeHtml(meeting?.title || "会议总结")}</h1>
+          <span class="ended-chip">${meeting?.status || "已结束"}</span>
+          <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
+          <div>
+            <button class="primary" data-action="toast" data-message="后端尚未提供会议纪要导出接口">${icon("download")}导出纪要</button>
+            <button class="secondary" data-action="toast" data-message="后端尚未提供会议总结分享接口">${icon("share")}分享</button>
+          </div>
+        </header>
+        <section class="summary-grid">
+          <article class="panel conclusions">
+            <h2>${icon("sparkle")}会议结论</h2>
+            ${renderEmptyState("暂无会议结论", "后端尚未提供会议结论/摘要结构化接口；当前不展示演示结论。", "summary-empty")}
+          </article>
+          <article class="panel minute">
+            <h2>${icon("file")}会议纪要摘要</h2>
+            ${renderEmptyState("暂无纪要摘要", "等待后端返回会议概况、参会人员、议题回顾等结构化纪要。", "summary-empty")}
+          </article>
+          <article class="panel todo-panel">
+            <h2>${icon("check")}待办事项</h2>
+            ${renderEmptyState("暂无待办事项", "后端尚未提供会后待办列表接口。", "summary-empty")}
+          </article>
+          <article class="panel refs-panel">
+            <h2>${icon("book")}引用材料</h2>
+            ${materials.length
+              ? materials.map((item) => `<button data-action="toast" data-message="${item.name} 已加入下载队列">${docBadge(item.type)}<strong>${item.name}</strong><span>${item.size}</span><time>${item.time || ""}</time>${icon("download", 16)}</button>`).join("")
+              : renderEmptyState("暂无引用材料", "当前会议未返回材料引用关系。", "summary-empty")}
+          </article>
+        </section>
+        <section class="panel delivery-strip">
+          <h2>${icon("grid")}交付物</h2>
+          <div>
+            ${deliverables.length
+              ? deliverables.map((item) => `
+                <article data-action="toast" data-message="${item.name} 已切换版本">
+                  ${docBadge(item.type)}
+                  <strong>${item.name}</strong>
+                  <p>${item.desc || item.subtitle || "后端返回的会议交付物。"}</p>
+                  <label>版本：<select><option>${item.version || "V1.0"}</option></select></label>
+                </article>
+              `).join("")
+              : renderEmptyState("暂无交付物", "后端尚未返回本会议交付物列表。", "summary-empty")}
+          </div>
+        </section>
+      </main>
+    `;
+  }
+
   return `
     <main class="summary-page">
       <header class="summary-header">
@@ -1402,10 +1651,11 @@ function renderKnowledge() {
   const visibleDocs = getKnowledgeDocsForCurrentTab();
   const selected = getSelectedKnowledgeDoc();
   const callable = selected ? isKnowledgeCallable(selected) : false;
+  const totalText = state.knowledgeLoaded && state.knowledgeTotal !== null ? state.knowledgeTotal : visibleDocs.length;
   const body = `
     <header class="page-header knowledge-head">
       <h1>知识库</h1>
-      <p>共 ${knowledgeDocs.length} 个文档</p>
+      <p>共 ${totalText} 个文档</p>
     </header>
     <section class="knowledge-layout">
       <div class="knowledge-main">
@@ -1420,7 +1670,7 @@ function renderKnowledge() {
             return `<button class="kb-row ${doc.id === selected?.id ? "active" : ""}" data-action="knowledge-select" data-id="${doc.id}">
               <span>${docBadge(doc.type)}${doc.name}</span><span>${doc.type.toUpperCase()}</span><span>${doc.updated}</span><span><i class="status-dot ${docCallable ? "on" : "off"}"></i>${docCallable ? "本次会议可调用" : "可用未调用"}</span>
             </button>`;
-          }).join("") : `<div class="kb-empty">没有匹配的知识文档</div>`}
+          }).join("") : `<div class="kb-empty">${state.knowledgeMessage || "没有匹配的知识文档"}</div>`}
           <footer>共 ${visibleDocs.length} 条 <button data-action="toast" data-message="已经是第一页">‹</button><button data-action="toast" data-message="当前第 1 页">1</button><button data-action="toast" data-message="没有更多页">›</button></footer>
         </div>
       </div>
@@ -1436,7 +1686,7 @@ function renderKnowledge() {
           <button class="ghost" data-action="modal" data-modal="knowledge-preview" data-id="${selected.id}">${icon("monitor")}预览</button>
           <button class="primary" data-action="modal" data-modal="knowledge-more" data-id="${selected.id}">更多操作</button>
         </footer>
-      </aside>` : `<aside class="knowledge-detail panel empty-detail"><h2>未选择文档</h2><p>调整搜索关键词或切换知识库范围后查看详情。</p></aside>`}
+      </aside>` : `<aside class="knowledge-detail panel empty-detail"><h2>${hasBackendSession() ? "知识库明细未返回" : "未选择文档"}</h2><p>${hasBackendSession() ? "当前后端只返回知识库总数，没有返回文档列表明细；等待后端补充后可展示文档详情。" : "调整搜索关键词或切换知识库范围后查看详情。"}</p></aside>`}
     </section>
   `;
   return renderShell(body);
@@ -1454,6 +1704,14 @@ function renderSettings() {
   }[state.settings.status] || "未测试";
   const body = `
     <header class="page-header"><h1>设置</h1></header>
+    <section class="settings-card panel backend-settings-card">
+      <header>${icon("monitor", 34)}<div><h2>后端 API</h2><p>桌面客户端只加载本地界面，会议、知识库、AI 和交付物能力全部通过该 API 地址调用。</p></div></header>
+      <label>API 地址 <strong>*</strong><input class="settings-api-base" value="${escapeHtml(state.apiBaseUrl)}" placeholder="https://api.vpbuddy.example.com" /></label>
+      <footer>
+        <div><i class="status-dot ${state.apiStatus === "connected" ? "on" : state.apiStatus === "loading" ? "pending" : "off"}"></i><strong>${state.apiStatus === "connected" ? "已连接" : state.apiStatus === "loading" ? "连接中" : "未连接"}</strong><p>${state.apiMessage}</p></div>
+        <button class="primary" data-action="save-api-base">${icon("file")}保存并重载</button>
+      </footer>
+    </section>
     <section class="settings-card panel">
       <header>${icon("sparkle", 34)}<div><h2>AI 配置</h2><p>配置 AI 模型与接口，驱动智能问答与内容生成</p></div></header>
       <label>API Key <strong>*</strong><textarea class="settings-api-key" placeholder="请输入您的 API Key">${escapeHtml(state.settings.apiKey)}</textarea></label>
@@ -1935,6 +2193,9 @@ document.addEventListener("click", async (event) => {
   if (action === "nav") {
     state.view = target.dataset.view;
     if (state.view !== "meeting") closeMeetingEvents();
+    render();
+    if (state.view === "knowledge") await loadKnowledgeFromBackend();
+    return;
   }
   if (action === "modal") {
     if (target.dataset.id) state.selectedKnowledge = target.dataset.id;
@@ -2058,6 +2319,11 @@ document.addEventListener("click", async (event) => {
     await saveAISettings();
     return;
   }
+  if (action === "save-api-base") {
+    updateBackendApiBaseFromInput();
+    saveBackendApiBase();
+    return;
+  }
 
   render();
 });
@@ -2079,6 +2345,10 @@ document.addEventListener("input", (event) => {
   }
   if (event.target.matches(".settings-api-key, .settings-endpoint")) {
     updateSettingsFromInputs();
+    return;
+  }
+  if (event.target.matches(".settings-api-base")) {
+    updateBackendApiBaseFromInput();
     return;
   }
   if (event.target.matches(".vpbuddy-input")) {

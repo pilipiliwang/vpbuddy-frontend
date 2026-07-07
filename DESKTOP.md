@@ -1,42 +1,61 @@
 # VPBuddy Desktop
 
-当前桌面壳使用 Electron 封装现有前端页面，目标是让用户双击 `VPBuddy.exe` 使用。
+VPBuddy Desktop is an Electron shell for the existing frontend. It loads the UI from local packaged files and calls the backend only through HTTP API endpoints.
 
-## 开发运行
+The backend, Hermes, ASR, knowledge base, and AI services are not bundled into the desktop app.
 
-```bash
-npm run desktop
-```
+## API Base URL
 
-默认后端地址：
+Default API base:
 
 ```text
-http://127.0.0.1:8765
+http://47.100.182.3:28765
 ```
 
-如需连接远程后端，可以启动前设置环境变量：
+Runtime override:
 
 ```powershell
 $env:VPBUDDY_API_BASE_URL="https://your-vpbuddy-api.example.com"
 npm run desktop
 ```
 
-## 打包 Windows 客户端
+Users can also change the API base in the app under Settings -> Backend API. The value is saved in local storage and used after reload.
+
+## Development
 
 ```bash
-npm run desktop:build
+npm install
+npm run desktop
 ```
 
-产物目录：
+## Build Windows Installers
+
+```bash
+npm run desktop:build:win
+```
+
+Artifacts:
 
 ```text
-release/
+release/VPBuddy-Setup-<version>-x64.exe
+release/VPBuddy-Portable-<version>-x64.exe
 ```
 
-会生成 Windows 安装包和便携版。后端、Hermes、ASR、知识库仍部署在服务器，桌面客户端只负责界面、本地文件选择、截屏、录音入口和 API 调用。
+## Build macOS Packages
 
-## 实现说明
+macOS packages must be built on macOS:
 
-- `desktop/main.cjs`：Electron 主进程，启动本地静态服务器并打开 VPBuddy 页面。
-- `desktop-config.js`：浏览器/桌面共用的默认后端地址配置。
-- `package.json`：包含 `desktop`、`desktop:dir`、`desktop:build` 脚本。
+```bash
+npm run desktop:build:mac
+```
+
+Artifacts:
+
+```text
+release/VPBuddy-<version>-mac-x64.dmg
+release/VPBuddy-<version>-mac-arm64.dmg
+release/VPBuddy-<version>-mac-x64.zip
+release/VPBuddy-<version>-mac-arm64.zip
+```
+
+The GitHub Actions workflow `.github/workflows/desktop-build.yml` builds both Windows and macOS packages and uploads them as workflow artifacts.

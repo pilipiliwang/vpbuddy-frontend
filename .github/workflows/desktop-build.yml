@@ -1,0 +1,64 @@
+name: Build Desktop Installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/desktop-build.yml"
+      - "assets/**"
+      - "desktop/**"
+      - "src/**"
+      - "index.html"
+      - "desktop-config.js"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    env:
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+      ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run desktop:build:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpbuddy-windows
+          path: |
+            release/VPBuddy-Setup-*.exe
+            release/VPBuddy-Portable-*.exe
+            release/*.blockmap
+          if-no-files-found: error
+
+  macos:
+    name: macOS installer
+    runs-on: macos-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+      ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run desktop:build:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpbuddy-macos
+          path: |
+            release/VPBuddy-*.dmg
+            release/VPBuddy-*.zip
+            release/*.blockmap
+          if-no-files-found: error

@@ -46,7 +46,7 @@ function resolveStaticPath(url = "/") {
 }
 
 function desktopConfigScript() {
-  const apiBaseUrl = process.env.VPBUDDY_API_BASE_URL || "http://127.0.0.1:8765";
+  const apiBaseUrl = process.env.VPBUDDY_API_BASE_URL || "http://47.100.182.3:28765";
   return [
     `window.VPBUDDY_API_BASE_URL = ${JSON.stringify(apiBaseUrl)};`,
     "window.VPBUDDY_DESKTOP = true;"
@@ -140,7 +140,7 @@ if (!gotLock) {
       const url = await startStaticServer();
       createMainWindow(url);
     } catch (error) {
-      dialog.showErrorBox("VPBuddy 启动失败", error?.message || String(error));
+      dialog.showErrorBox("VPBuddy failed to start", error?.message || String(error));
       app.quit();
     }
 
