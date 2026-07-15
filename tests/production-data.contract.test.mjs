@@ -175,32 +175,67 @@ test("meeting workspace opens with records before materials", () => {
 });
 
 test("recording controls pause locally and persist records through the backend ASR flow", () => {
+  const recordsSource = sourceBetween(mainSource, "function renderMeetingRecords()", "function renderUnderstanding()");
   assertSourceIncludes(mainSource, /recording\s*\?\s*["']暂停录制["'][\s\S]{0,120}?paused[\s\S]{0,80}?["']继续录制["']/, "the active recording control must pause and resume instead of finalizing the meeting");
   assertSourceIncludes(mainSource, /action\s*===\s*["']toggle-recording["'][\s\S]{0,260}?pauseRealtimeRecording\(\)[\s\S]{0,220}?resumeRealtimeRecording\(\)[\s\S]{0,180}?startRealtimeRecording\(\)/, "the recording button must implement start, pause, and resume states");
   assertSourceIncludes(mainSource, /async function\s+stopRealtimeRecording[\s\S]{0,900}?realtimeAsrSession\.stop\(\)[\s\S]{0,900}?refreshTranscript\(meetingId,\s*\{\s*notify:\s*false\s*\}\)/, "final stop must send the realtime ASR stop control and then reload persisted transcript segments");
   assertSourceIncludes(mainSource, /async function\s+endCurrentMeeting[\s\S]{0,1000}?stopRealtimeRecording\(\)[\s\S]{0,700}?if\s*\(!finalizedByRealtime\)\s*await\s+api\.archiveMeeting\(meeting\.id\)/, "ending a live meeting must avoid a duplicate close request after WebSocket stop already finalized it");
   assertSourceIncludes(mainSource, /const\s+preserveActiveRecording\s*=\s*nextMeetingId\s*===\s*state\.selectedMeetingId[\s\S]{0,260}?Boolean\(realtimeAsrSession\)/, "returning to the same meeting must detect its active ASR session");
   assertSourceIncludes(mainSource, /if\s*\(!preserveActiveRecording\)\s*resetRecordingState\(\)/, "an active same-meeting ASR session and elapsed time must not be reset");
-  assertSourceIncludes(mainSource, /meetingRecords\.map[\s\S]{0,350}?item\.speaker[\s\S]{0,180}?item\.role[\s\S]{0,180}?item\.time[\s\S]{0,220}?item\.text/, "meeting records must display backend speaker, role, time, and transcript content");
+  assertSourceIncludes(recordsSource, /meetingRecords\.map[\s\S]{0,260}?item\.time[\s\S]{0,180}?item\.text/, "meeting records must display backend time and transcript content");
+  assertSourceExcludes(recordsSource, /item\.(?:speaker|role)/, "speaker and role labels must stay hidden from the simplified transcript cards");
+  assertSourceIncludes(stylesSource, /\.record-item\s*\{[\s\S]{0,220}?grid-template-columns:\s*58px\s+minmax\(0,\s*1fr\)/, "transcript cards must reserve a compact time column and a flexible text column");
   assertSourceIncludes(stylesSource, /\.recording\.paused\s*\{[\s\S]{0,180}?color:\s*#ffd27d/, "the paused state must be visibly distinct from active recording");
 });
 
 test("deliverable view opens with Demo first and selected", () => {
-  assertSourceIncludes(mainSource, /function\s+getOrderedDeliverables\s*\([\s\S]{0,500}?kind\s*===\s*["']demo["']/, "the deliverable list must prioritize Demo");
+  assertSourceIncludes(mainSource, /function\s+getOrderedDeliverables\s*\([\s\S]{0,500}?\[["']demo["'],\s*["']req["'],\s*["']arch["'],\s*["']tasks["'],\s*["']api["'],\s*["']risk["']\]/, "the deliverable list must use the explicit Demo-first product order");
   assertSourceIncludes(mainSource, /function\s+getDefaultDeliverable\s*\([\s\S]{0,250}?find\(\(item\)\s*=>\s*item\.kind\s*===\s*["']demo["']\)/, "Demo must be the default deliverable");
   assertSourceIncludes(mainSource, /action\s*===\s*["']stage-tab["'][\s\S]{0,300}?stageTab\s*===\s*["']deliverable["'][\s\S]{0,150}?getDefaultDeliverable\(\)/, "opening the deliverable tab must reset selection to Demo");
 });
 
 test("meeting summary renders only deliverables with Demo first", () => {
-  const summarySource = sourceBetween(mainSource, "function renderSummary()", "function renderKnowledge()");
+  const summarySource = sourceBetween(mainSource, "function renderSummaryDeliverable", "function renderKnowledge()");
   assertSourceExcludes(summarySource, /会议结论|会议纪要摘要|待办事项|引用材料/, "the four obsolete summary modules must be hidden");
   assertSourceExcludes(summarySource, /(?:icon\(["']share["']\)|>\s*分享\s*<)/, "the summary must not expose sharing");
   assertSourceExcludes(summarySource, /class=["']summary-grid["']/, "the summary body must no longer reserve the four-module grid");
   assertSourceIncludes(summarySource, /const\s+\w*[Dd]eliverables\s*=\s*getOrderedDeliverables\(\)/, "the summary must consume the Demo-first deliverable ordering");
-  assertSourceIncludes(summarySource, /data-action=["']download-all-deliverables["'][\s\S]{0,160}?>[\s\S]{0,100}?下载/, "the summary Download action must request the complete six-file archive");
+  assertSourceIncludes(summarySource, /data-action=["']download-all-deliverables["'][\s\S]{0,180}?>[\s\S]{0,220}?下载/, "the summary Download action must request the complete six-file archive");
   assertSourceIncludes(summarySource, /class=["'][^"']*delivery-strip[^"']*["']/, "deliverables must be the only summary content section");
-  assertSourceIncludes(summarySource, /(?:canonicalDeliverableKind\(item\.kind\)|item\.kind)\s*===\s*["']demo["'][\s\S]{0,260}?(?:renderDemoVersionControl|demo-version-select)/, "only the Demo summary card may expose version switching");
+  assertSourceIncludes(summarySource, /const\s+isDemo\s*=\s*kind\s*===\s*["']demo["'][\s\S]{0,700}?if\s*\(isDemo\)[\s\S]{0,700}?renderDemoVersionControl\(\)/, "only the Demo summary branch may expose version switching");
   assertSourceExcludes(summarySource, /<label>\s*版本：[\s\S]{0,120}?item\.version/, "text summary cards must not render static versions");
+});
+
+test("meeting summary renders backend bodies and a full-width Demo preview", () => {
+  const summarySource = sourceBetween(mainSource, "function renderSummaryDeliverable", "function renderKnowledge()");
+  assertSourceIncludes(summarySource, /const\s+content\s*=\s*String\(item\.content\s*\|\|\s*["']["']\)\.trim\(\)/, "summary rendering must read each backend deliverable body");
+  assertSourceIncludes(summarySource, /class=["']summary-doc-content markdown-content["']>\$\{renderMarkdown\(content\)\}/, "text deliverables must render their backend Markdown body");
+  assertSourceIncludes(summarySource, /class=["']summary-demo-preview["'][\s\S]{0,220}?data-stable-demo-frame=["']summary-demo["']/, "the Demo summary must expose an actual stable iframe preview");
+  assertSourceIncludes(stylesSource, /\.delivery-strip\s*>\s*\.summary-deliverable-list\s*\{[\s\S]{0,180}?grid-template-columns:\s*minmax\(0,\s*1fr\)/, "summary deliverables must use a readable single-column flow instead of five compressed columns");
+  assertSourceIncludes(stylesSource, /\.summary-demo-preview\s*\{[\s\S]{0,240}?min-height:\s*480px/, "the top Demo preview must receive useful viewport height");
+});
+
+test("summary loading uses isolated responsive skeleton cards", () => {
+  const loadingSource = sourceBetween(mainSource, "function renderSummaryLoading", "function renderSummaryDeliverable");
+  assertSourceIncludes(loadingSource, /class=["']panel summary-detail-loading["']/, "summary loading must not inherit the deliverable card grid");
+  assertSourceIncludes(loadingSource, /class=["']summary-loading-grid["']/, "summary loading must use a dedicated skeleton grid");
+  assertSourceExcludes(loadingSource, /<article[^>]*summary-loading-panel/, "loading status must not be styled as the first Demo article");
+  assertSourceIncludes(stylesSource, /\.summary-loading-grid\s*\{[\s\S]{0,160}?repeat\(3,\s*minmax\(0,\s*1fr\)\)/, "desktop loading cards must stay in stable columns");
+  assertSourceIncludes(stylesSource, /@media\s*\(max-width:\s*980px\)[\s\S]*?\.summary-loading-grid\s*\{[\s\S]{0,100}?grid-template-columns:\s*minmax\(0,\s*1fr\)/, "narrow summary loading must collapse to one column");
+});
+
+test("text deliverable details omit redundant metadata headers when a body exists", () => {
+  const canvasSource = sourceBetween(mainSource, "function renderDeliverableCanvas()", "function renderVpbuddyComposer()");
+  assertSourceIncludes(canvasSource, /const\s+hasTextBody\s*=\s*isTextOnlyDeliverable\s*&&\s*Boolean\(bodyContent\)/, "text deliverables must detect a real backend body");
+  assertSourceIncludes(canvasSource, /\$\{hasTextBody\s*\?\s*["']["']\s*:\s*`[\s\S]{0,300}?<header/, "a real body must suppress the redundant fixed document header");
+  assertSourceIncludes(canvasSource, /isTextOnlyDeliverable[\s\S]{0,180}?<article class=["']deliverable-content markdown-content["']>\$\{renderMarkdown\(current\.content\)\}/, "the backend Markdown body must remain visible after suppressing the header");
+});
+
+test("Demo iframe is reused for unrelated renders and replaced only when src changes", () => {
+  assertSourceIncludes(mainSource, /function\s+updateAppMarkup[\s\S]{0,900}?iframe\[data-stable-demo-frame\]/, "the app renderer must detect stable Demo frames");
+  assertSourceIncludes(mainSource, /current\.getAttribute\(["']src["']\)\s*===\s*next\.getAttribute\(["']src["']\)/, "a Demo frame may be reused only when its src is unchanged");
+  assertSourceIncludes(mainSource, /canPreserveFrame[\s\S]{0,180}?patchDomChildren\(app,\s*template\.content\)/, "unrelated state updates must patch the existing DOM instead of rebuilding the iframe");
+  assertSourceIncludes(mainSource, /data-stable-demo-frame=["']meeting-demo["']/, "the meeting Demo iframe must opt into stable reuse");
 });
 
 test("long account names stay inside the sidebar card", () => {
@@ -231,8 +266,38 @@ test("AI follow-up content sits directly below the AI collaboration heading", ()
   assertSourceIncludes(stylesSource, /\.followup-list\s*\{[\s\S]{0,160}?grid-auto-rows:\s*max-content[\s\S]{0,240}?overflow-y:\s*auto/, "the full follow-up stream must keep content-sized cards and scroll vertically inside the panel");
   assertSourceIncludes(stylesSource, /\.followup-row\s*\{[\s\S]{0,120}?min-height:\s*max-content/, "follow-up cards must not be compressed below their content height");
   assertSourceIncludes(stylesSource, /\.followup-row strong\s*\{[\s\S]{0,160}?display:\s*block/, "follow-up cards must grow with their question text");
-  assertSourceIncludes(aiPanelSource, /实时展示Agent协调内容，自主提出会议问题/, "the empty AI stream must explain its autonomous coordination purpose");
+  assertSourceIncludes(aiPanelSource, /实时展示 Agent 协调内容[\s\S]{0,120}?自主提出会议问题/, "the empty AI stream must use a concise title and a distinct supporting line");
+  assertSourceExcludes(aiPanelSource, /自主提出会议问题[\s\S]{0,120}?自主提出会议问题/, "the AI empty state must not repeat the same message");
   assertSourceExcludes(aiPanelSource, /暂无\s*AI\s*反问|当前会议的后端协同问答列表中没有待回答问题/, "the obsolete no-follow-up copy must be removed");
+});
+
+test("AI collaboration cards and details safely render Markdown without reasoning tags", () => {
+  const aiPanelSource = sourceBetween(mainSource, "function renderAIPanel()", "function renderTimeline()");
+  const modalSource = sourceBetween(mainSource, 'if (state.modal === "followup-detail")', 'if (state.modal === "all-explanations")');
+  assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,700}?stripAssistantReasoning\(item\.question/, "collaboration DTOs must remove model reasoning before display");
+  assertSourceIncludes(aiPanelSource, /renderMarkdown\(stripAssistantReasoning\(item\.question\)\)/, "AI collaboration cards must use the safe Markdown renderer");
+  assertSourceIncludes(aiPanelSource, /class=["']followup-markdown markdown-content["']/, "AI collaboration cards must expose structured Markdown styling");
+  assertSourceIncludes(modalSource, /<h2>内容详情<\/h2>/, "the follow-up modal must use the neutral content-detail title");
+  assertSourceIncludes(modalSource, /renderMarkdown\(stripAssistantReasoning\(selectedFollowup\?\.question\)\)/, "the modal body must use the safe Markdown renderer");
+  assertSourceIncludes(modalSource, /renderMarkdown\(stripAssistantReasoning\(selectedFollowup\?\.reason\)\)/, "the modal reason must use the safe Markdown renderer");
+  assertSourceIncludes(stylesSource, /\.followup-detail-modal\s*\{[\s\S]{0,180}?overflow-x:\s*hidden[\s\S]{0,100}?overscroll-behavior:\s*contain/, "the detail modal must scroll vertically without a horizontal scrollbar");
+  assertSourceIncludes(stylesSource, /\.followup-detail-modal \.modal-markdown\s*\{[\s\S]{0,220}?font-size:\s*17px[\s\S]{0,100}?overflow-wrap:\s*anywhere/, "modal Markdown must be larger and break long paths safely");
+});
+
+test("Demo version controls show only compact canonical labels", () => {
+  const versionSource = sourceBetween(mainSource, "function renderDemoVersionControl()", "function renderDeliverableDownloadMenu");
+  assertSourceIncludes(versionSource, /<option value=[\s\S]{0,180}?\$\{escapeHtml\(item\.label\)\}<\/option>/, "Demo options must show the canonical V-number label");
+  assertSourceExcludes(versionSource, /item\.summary/, "long Demo summaries must not enter the compact selector");
+  assertSourceIncludes(stylesSource, /\.deliverable-version-control\s*\{[\s\S]{0,220}?width:\s*178px[\s\S]{0,180}?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+58px/, "the version control must reserve stable label and selector columns");
+  assertSourceIncludes(stylesSource, /\.deliverable-version-control select\s*\{[\s\S]{0,160}?width:\s*58px[\s\S]{0,100}?max-width:\s*58px/, "the V-number selector must not expand into adjacent actions");
+});
+
+test("deliverable rows stay inside the sidebar at narrow widths", () => {
+  assertSourceIncludes(mainSource, /class=["']deliverable-row \$\{canonicalDeliverableKind\(item\.kind\) === ["']demo["'] \? ["']is-demo["']/, "Demo rows must opt into their three-column layout explicitly");
+  assertSourceIncludes(stylesSource, /\.deliverable-stack\s*\{[\s\S]{0,140}?width:\s*100%[\s\S]{0,100}?max-width:\s*100%/, "the deliverable stack must stay within the sidebar width");
+  assertSourceIncludes(stylesSource, /\.deliverable-row\s*\{[\s\S]{0,220}?box-sizing:\s*border-box[\s\S]{0,160}?max-width:\s*100%[\s\S]{0,220}?grid-template-columns:\s*42px\s+minmax\(0,\s*1fr\)/, "deliverable rows must use contained flexible columns");
+  assertSourceIncludes(stylesSource, /\.deliverable-row\s*>\s*span\s*\{[\s\S]{0,140}?min-width:\s*0[\s\S]{0,120}?overflow:\s*hidden/, "long titles and timestamps must shrink within the text column");
+  assertSourceIncludes(stylesSource, /@media\s*\(max-width:\s*980px\)[\s\S]*?\.deliverable-row,[\s\S]{0,100}?\.deliverable-row\.is-demo\s*\{[\s\S]{0,120}?padding-inline:\s*10px/, "narrow layouts must retain internal padding without widening the active border");
 });
 
 test("sending VPBuddy materials exposes progress in the composer", () => {
@@ -240,8 +305,8 @@ test("sending VPBuddy materials exposes progress in the composer", () => {
   assertSourceIncludes(mainSource, /renderUploadProgress\(["']vpbuddy-material["']\)/, "the VPBuddy composer must render attachment progress");
   assertSourceIncludes(mainSource, /data-action=["']send-vpbuddy-material["'][^>]*\$\{materialSending\s*\?\s*["']disabled["']/, "the material button must disable while sending");
   assertSourceIncludes(mainSource, /const\s+progressContext\s*=\s*context\s*;/, "chat attachment progress must keep its own context instead of rendering in meeting materials");
-  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["'][\s\S]{0,500}?api\.uploadMaterial\(state\.selectedMeetingId,\s*file\)/, "material sending must persist through the canonical meeting material API");
-  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["']\s*&&\s*succeeded[\s\S]{0,500}?api\.listMaterials\(state\.selectedMeetingId\)[\s\S]{0,180}?api\.listChatHistory\(state\.selectedMeetingId\)/, "a successful send must refresh both meeting materials and VPBuddy history");
+  assertSourceIncludes(mainSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "material sending must persist through the canonical meeting material API pinned to its meeting");
+  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["']\s*&&\s*succeeded[\s\S]{0,500}?api\.listMaterials\(meetingId\)[\s\S]{0,180}?api\.listChatHistory\(meetingId\)/, "a successful send must refresh both meeting materials and VPBuddy history for the pinned meeting");
   assertSourceIncludes(mainSource, /state\.meetingLeftTab\s*=\s*["']materials["'][\s\S]{0,200}?state\.showComposerHistory\s*=\s*true/, "a successful send must reveal the material list and upload conversation record");
   assertSourceExcludes(mainSource, /context\s*===\s*["']vpbuddy-material["'][\s\S]{0,500}?api\.sendChatAttachment\s*\(/, "material sending must not upload the same file through a second chat endpoint");
   assertSourceIncludes(mainSource, /messageSource\s*===\s*["']material-upload["']\s*\?\s*["']material["']/, "backend material-upload history must render as an upload record");
@@ -263,8 +328,8 @@ test("stage screenshots are persisted as meeting materials", () => {
   const captureEnd = mainSource.indexOf('document.addEventListener("click"', captureStart);
   const captureSource = mainSource.slice(captureStart, captureEnd);
   assert.notEqual(captureStart, -1, "the stage screenshot handler must exist");
-  assertSourceIncludes(captureSource, /api\.uploadMaterial\(state\.selectedMeetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API");
-  assertSourceIncludes(captureSource, /api\.listMaterials\(state\.selectedMeetingId\)/, "the meeting material list must refresh after screenshot upload");
+  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
+  assertSourceIncludes(captureSource, /api\.listMaterials\(meetingId\)/, "the pinned meeting material list must refresh after screenshot upload");
   assertSourceIncludes(captureSource, /context:\s*["']material["'][\s\S]{0,120}?status:\s*["']uploading["']/, "screenshot upload must expose truthful material progress");
   assertSourceExcludes(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be sent only as a chat attachment");
 });
@@ -331,7 +396,7 @@ test("Demo preview exposes fullscreen from its top-right actions", () => {
 
 test("meeting details render a stable loading layout and retain same-meeting cache", () => {
   assertSourceIncludes(mainSource, /meetingDetailLoading:\s*false/, "meeting detail loading state must be explicit");
-  assertSourceIncludes(mainSource, /action\s*===\s*["']open-meeting["'][\s\S]{0,650}?meetingDetailLoading\s*=\s*state\.loadedMeetingDetailId\s*!==\s*state\.selectedMeetingId[\s\S]{0,120}?render\(\)/, "meeting navigation must render loading state before awaiting APIs");
+  assertSourceIncludes(mainSource, /action\s*===\s*["']open-meeting["'][\s\S]{0,1100}?meetingDetailLoading\s*=\s*state\.loadedMeetingDetailId\s*!==\s*state\.selectedMeetingId[\s\S]{0,120}?render\(\)/, "meeting navigation must render loading state before awaiting APIs");
   assertSourceIncludes(mainSource, /function\s+renderMeetingLoadingColumns[\s\S]{0,1800}?正在加载会议内容/, "the meeting workspace must render structural loading columns instead of an empty page");
   assertSourceIncludes(mainSource, /meetingDetailLoading\s*\?\s*renderMeetingLoadingColumns\(\)/, "the stage must select the loading columns while details are pending");
   assertSourceIncludes(mainSource, /function\s+renderSummaryLoading[\s\S]{0,1800}?正在加载交付物/, "ended-meeting summaries must retain a stable deliverable loading view");
