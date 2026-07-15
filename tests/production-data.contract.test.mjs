@@ -305,8 +305,8 @@ test("sending VPBuddy materials exposes progress in the composer", () => {
   assertSourceIncludes(mainSource, /renderUploadProgress\(["']vpbuddy-material["']\)/, "the VPBuddy composer must render attachment progress");
   assertSourceIncludes(mainSource, /data-action=["']send-vpbuddy-material["'][^>]*\$\{materialSending\s*\?\s*["']disabled["']/, "the material button must disable while sending");
   assertSourceIncludes(mainSource, /const\s+progressContext\s*=\s*context\s*;/, "chat attachment progress must keep its own context instead of rendering in meeting materials");
-  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["'][\s\S]{0,500}?api\.uploadMaterial\(state\.selectedMeetingId,\s*file\)/, "material sending must persist through the canonical meeting material API");
-  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["']\s*&&\s*succeeded[\s\S]{0,500}?api\.listMaterials\(state\.selectedMeetingId\)[\s\S]{0,180}?api\.listChatHistory\(state\.selectedMeetingId\)/, "a successful send must refresh both meeting materials and VPBuddy history");
+  assertSourceIncludes(mainSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "material sending must persist through the canonical meeting material API pinned to its meeting");
+  assertSourceIncludes(mainSource, /context\s*===\s*["']vpbuddy-material["']\s*&&\s*succeeded[\s\S]{0,500}?api\.listMaterials\(meetingId\)[\s\S]{0,180}?api\.listChatHistory\(meetingId\)/, "a successful send must refresh both meeting materials and VPBuddy history for the pinned meeting");
   assertSourceIncludes(mainSource, /state\.meetingLeftTab\s*=\s*["']materials["'][\s\S]{0,200}?state\.showComposerHistory\s*=\s*true/, "a successful send must reveal the material list and upload conversation record");
   assertSourceExcludes(mainSource, /context\s*===\s*["']vpbuddy-material["'][\s\S]{0,500}?api\.sendChatAttachment\s*\(/, "material sending must not upload the same file through a second chat endpoint");
   assertSourceIncludes(mainSource, /messageSource\s*===\s*["']material-upload["']\s*\?\s*["']material["']/, "backend material-upload history must render as an upload record");
@@ -328,8 +328,8 @@ test("stage screenshots are persisted as meeting materials", () => {
   const captureEnd = mainSource.indexOf('document.addEventListener("click"', captureStart);
   const captureSource = mainSource.slice(captureStart, captureEnd);
   assert.notEqual(captureStart, -1, "the stage screenshot handler must exist");
-  assertSourceIncludes(captureSource, /api\.uploadMaterial\(state\.selectedMeetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API");
-  assertSourceIncludes(captureSource, /api\.listMaterials\(state\.selectedMeetingId\)/, "the meeting material list must refresh after screenshot upload");
+  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
+  assertSourceIncludes(captureSource, /api\.listMaterials\(meetingId\)/, "the pinned meeting material list must refresh after screenshot upload");
   assertSourceIncludes(captureSource, /context:\s*["']material["'][\s\S]{0,120}?status:\s*["']uploading["']/, "screenshot upload must expose truthful material progress");
   assertSourceExcludes(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be sent only as a chat attachment");
 });

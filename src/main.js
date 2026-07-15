@@ -106,6 +106,7 @@ let recordingTimer = 0;
 let knowledgeSearchTimer = 0;
 let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
+let meetingMaterialsRevision = 0;
 
 const user = {
   name: "VPBuddy 用户",
@@ -628,8 +629,32 @@ function normalizeMaterial(raw, index = 0) {
 }
 
 function normalizeMaterialsResponse(payload) {
-  const list = Array.isArray(payload) ? payload : payload?.materials || payload?.items || payload?.data || [];
+  const candidates = [
+    payload,
+    payload?.materials,
+    payload?.items,
+    payload?.data?.materials,
+    payload?.data?.items,
+    payload?.data
+  ];
+  const list = candidates.find(Array.isArray) || [];
   return list.map(normalizeMaterial);
+}
+
+function normalizeUploadedMaterialResponse(payload, index = 0) {
+  const raw = payload?.material ?? payload?.data?.material ?? payload?.data ?? payload;
+  return normalizeMaterial(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}, index);
+}
+
+function mergeMaterials(refreshedMaterials, uploadedMaterials) {
+  const merged = [];
+  const seen = new Set();
+  for (const material of [...uploadedMaterials, ...refreshedMaterials]) {
+    if (!material?.id || seen.has(material.id)) continue;
+    seen.add(material.id);
+    merged.push(material);
+  }
+  return merged;
 }
 
 function normalizeKnowledgeDoc(raw, index = 0) {
@@ -876,9 +901,11 @@ function normalizeChatHistoryResponse(payload) {
 
 function applyChatHistory(payload) {
   const messages = normalizeChatHistoryResponse(payload);
-  replaceArray(state.vpbuddyMessages, messages);
-  state.showComposerHistory = messages.length > 0;
-  return messages;
+  const pendingMaterialMessages = state.vpbuddyMessages.filter((message) => message.type === "material" && message.materialId);
+  const mergedMessages = dedupeVpbuddyMessages([...messages, ...pendingMaterialMessages]);
+  replaceArray(state.vpbuddyMessages, mergedMessages);
+  state.showComposerHistory = mergedMessages.length > 0;
+  return mergedMessages;
 }
 
 function setApiStatus(status, message) {
@@ -1027,6 +1054,7 @@ async function loadMeetingsFromBackend() {
 
 async function loadMeetingDetailFromBackend(meetingId) {
   const loadSequence = ++meetingDetailLoadSequence;
+  const materialRevisionAtLoad = meetingMaterialsRevision;
   const hasCachedDetail = state.loadedMeetingDetailId === meetingId;
   state.meetingDetailLoading = !hasCachedDetail;
   if (!hasCachedDetail) {
@@ -1059,11 +1087,11 @@ async function loadMeetingDetailFromBackend(meetingId) {
     api.listDemoVersions(meetingId)
   ]);
   if (loadSequence !== meetingDetailLoadSequence) return;
+  if (meetingId !== state.selectedMeetingId) return;
+  const canApplyMaterialSnapshot = meetingMaterialsRevision === materialRevisionAtLoad;
 
   let connected = false;
-  let detailHadTranscripts = false;
   let detailHadDeliverables = false;
-  let detailHadMaterials = false;
   const [detail, transcript, materialList, deliverableList, chatHistory, collab, demoVersionList] = results;
 
   if (detail.status === "fulfilled" && detail.value) {
@@ -1088,7 +1116,6 @@ async function loadMeetingDetailFromBackend(meetingId) {
 
     const detailTranscripts = normalizeTranscriptResponse(detail.value);
     if (detailTranscripts.length) {
-      detailHadTranscripts = true;
       replaceArray(meetingRecords, detailTranscripts);
     }
 
@@ -1099,8 +1126,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
     }
 
     const detailMaterials = normalizeMaterialsResponse(detail.value);
-    if (detailMaterials.length) {
-      detailHadMaterials = true;
+    if (canApplyMaterialSnapshot && detailMaterials.length) {
       replaceArray(materials, detailMaterials);
     }
     const detailItems = detail.value?.state?.items || detail.value?.items || [];
@@ -1110,7 +1136,9 @@ async function loadMeetingDetailFromBackend(meetingId) {
   if (transcript.status === "fulfilled") {
     connected = true;
     const nextRecords = normalizeTranscriptResponse(transcript.value);
-    replaceArray(meetingRecords, nextRecords);
+    if (nextRecords.length) {
+      replaceArray(meetingRecords, nextRecords);
+    }
     const stateItems = transcript.value?.state?.items || [];
     if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
   }
@@ -1130,8 +1158,12 @@ async function loadMeetingDetailFromBackend(meetingId) {
 
   if (materialList.status === "fulfilled") {
     connected = true;
-    const nextMaterials = normalizeMaterialsResponse(materialList.value);
-    replaceArray(materials, nextMaterials);
+    if (canApplyMaterialSnapshot) {
+      const nextMaterials = normalizeMaterialsResponse(materialList.value);
+      if (nextMaterials.length || !materials.length) {
+        replaceArray(materials, nextMaterials);
+      }
+    }
   }
 
   if (chatHistory.status === "fulfilled") {
@@ -1145,13 +1177,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   }
 
   if (connected) {
-    if (transcript.status !== "fulfilled" && !detailHadTranscripts) replaceArray(meetingRecords, []);
     if (deliverableList.status !== "fulfilled" && !detailHadDeliverables) replaceArray(deliverables, []);
-    if (materialList.status !== "fulfilled" && !detailHadMaterials) replaceArray(materials, []);
-    if (chatHistory.status !== "fulfilled") {
-      replaceArray(state.vpbuddyMessages, []);
-      state.showComposerHistory = false;
-    }
   }
 
   if (deliverables.length && !state.selectedDeliverable) state.selectedDeliverable = getDefaultDeliverable().id;
@@ -1311,7 +1337,7 @@ async function startRealtimeRecording() {
       },
       onComplete: () => {
         state.recordingMessage = "本次录音转写已完成";
-        void refreshTranscript(meetingId, { notify: false });
+        render();
       },
       onError: (error) => {
         state.recordingStatus = "error";
@@ -1482,7 +1508,10 @@ async function refreshTranscript(meetingId, { notify = true } = {}) {
   try {
     const payload = await api.listTranscriptSegments(meetingId);
     if (meetingId !== state.selectedMeetingId) return;
-    replaceArray(meetingRecords, normalizeTranscriptResponse(payload));
+    const nextRecords = normalizeTranscriptResponse(payload);
+    if (nextRecords.length || !meetingRecords.length) {
+      replaceArray(meetingRecords, nextRecords);
+    }
     const stateItems = payload?.state?.items || [];
     if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
     if (notify) setToast("会议记录已从后端刷新");
@@ -3331,6 +3360,12 @@ function canvasToPngBlob(canvas) {
 }
 
 async function captureStageScreenshot() {
+  const meetingId = state.selectedMeetingId;
+  if (!meetingId) {
+    setToast("请先创建或选择一场会议", false);
+    render();
+    return;
+  }
   const image = document.querySelector(".annotation-canvas img");
   if (!image) {
     setToast("暂无可截屏的投屏内容");
@@ -3343,6 +3378,7 @@ async function captureStageScreenshot() {
       image.addEventListener("load", resolve, { once: true });
       image.addEventListener("error", reject, { once: true });
     });
+    if (meetingId !== state.selectedMeetingId) return;
   }
 
   const width = image.naturalWidth || 1600;
@@ -3355,6 +3391,7 @@ async function captureStageScreenshot() {
   drawStageAnnotations(ctx, width, height);
 
   const blob = await canvasToPngBlob(canvas);
+  if (meetingId !== state.selectedMeetingId) return;
   if (!blob) {
     setToast("截屏生成失败，请重试");
     render();
@@ -3367,25 +3404,55 @@ async function captureStageScreenshot() {
   state.uploadProgress = progress;
   render();
   try {
-    const uploaded = await api.uploadMaterial(state.selectedMeetingId, file);
+    const uploaded = await api.uploadMaterial(meetingId, file);
+    if (meetingId !== state.selectedMeetingId) {
+      if (state.uploadProgress === progress) state.uploadProgress = null;
+      return;
+    }
+    meetingMaterialsRevision += 1;
+    const uploadedMaterial = normalizeUploadedMaterialResponse(uploaded, materials.length);
+    replaceArray(materials, mergeMaterials(materials, [uploadedMaterial]));
+    addVpbuddyMessage({
+      time: nowTime(),
+      text: `[上传了材料: ${uploadedMaterial.name}]`,
+      type: "material",
+      source: "material-upload",
+      materialId: uploadedMaterial.id
+    });
+    state.showComposerHistory = true;
     progress.current = 1;
     progress.status = "complete";
 
+    const refreshRevision = meetingMaterialsRevision;
     try {
-      const payload = await api.listMaterials(state.selectedMeetingId);
-      replaceArray(materials, normalizeMaterialsResponse(payload));
+      const payload = await api.listMaterials(meetingId);
+      if (meetingId !== state.selectedMeetingId) {
+        if (state.uploadProgress === progress) state.uploadProgress = null;
+        return;
+      }
+      if (meetingMaterialsRevision === refreshRevision) {
+        const refreshedMaterials = normalizeMaterialsResponse(payload);
+        replaceArray(materials, mergeMaterials(refreshedMaterials, [uploadedMaterial]));
+      }
     } catch (refreshError) {
-      const uploadedMaterial = normalizeMaterial(uploaded, materials.length);
-      if (!materials.some((item) => item.id === uploadedMaterial.id)) materials.push(uploadedMaterial);
+      if (meetingId !== state.selectedMeetingId) {
+        if (state.uploadProgress === progress) state.uploadProgress = null;
+        return;
+      }
       recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: refreshError.message });
     }
 
-    const uploadedId = uploaded?.id || uploaded?.material_id || "";
+    if (meetingId !== state.selectedMeetingId) return;
+    const uploadedId = uploadedMaterial.id;
     state.selectedMaterial = materials.some((item) => item.id === uploadedId)
       ? uploadedId
       : materials.at(-1)?.id || materials[0]?.id || "";
     setToast(`截屏已上传为会议材料：${file.name}`);
   } catch (error) {
+    if (meetingId !== state.selectedMeetingId) {
+      if (state.uploadProgress === progress) state.uploadProgress = null;
+      return;
+    }
     progress.status = "error";
     setToast(`截屏上传失败：${error.message}`, false);
   }
@@ -3615,7 +3682,10 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-material") {
     state.selectedMaterial = target.dataset.id;
+    document.querySelectorAll(".material-row.active").forEach((row) => row.classList.remove("active"));
+    target.closest(".material-row[data-id]")?.classList.add("active");
     setToast("材料已选中，双击可投屏");
+    return;
   }
   if (action === "download-material") {
     const material = materials.find((item) => item.id === target.dataset.id);
@@ -3792,10 +3862,11 @@ document.addEventListener("change", async (event) => {
   if (!event.target.matches(".native-file-input")) return;
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
+  const meetingId = state.selectedMeetingId;
   const names = files.map((file) => file.name).join("、");
   const context = state.fileUploadContext;
   const progressContext = context;
-  if (!state.selectedMeetingId) {
+  if (!meetingId) {
     setToast(context === "knowledge"
       ? "当前后端的个人知识库上传仍要求 meeting_id，请先创建或选择一场会议"
       : "请先创建或选择一场会议", false);
@@ -3815,27 +3886,48 @@ document.addEventListener("change", async (event) => {
     progress.name = file.name;
     render();
     try {
-      if (context === "vpbuddy-material") {
-        const uploaded = await api.uploadMaterial(state.selectedMeetingId, file);
-        const uploadedMaterial = normalizeMaterial(uploaded, materials.length);
-        const existingIndex = materials.findIndex((item) => item.id === uploadedMaterial.id);
-        if (existingIndex >= 0) materials.splice(existingIndex, 1, uploadedMaterial);
-        else materials.unshift(uploadedMaterial);
+      if (context !== "knowledge") {
+        const uploaded = await api.uploadMaterial(meetingId, file);
+        if (meetingId !== state.selectedMeetingId) {
+          if (state.uploadProgress === progress) state.uploadProgress = null;
+          event.target.value = "";
+          return;
+        }
+        meetingMaterialsRevision += 1;
+        const uploadedMaterial = normalizeUploadedMaterialResponse(uploaded, materials.length);
         uploadedMaterials.push(uploadedMaterial);
+        replaceArray(materials, mergeMaterials(materials, [uploadedMaterial]));
         state.selectedMaterial = uploadedMaterial.id;
         state.meetingLeftTab = "materials";
-        state.showComposerHistory = true;
-      } else if (context === "knowledge") {
+        if (context === "vpbuddy-material") {
+          addVpbuddyMessage({
+            time: nowTime(),
+            text: `[上传了材料: ${uploadedMaterial.name}]`,
+            type: "material",
+            source: "material-upload",
+            materialId: uploadedMaterial.id
+          });
+          state.showComposerHistory = true;
+        }
+      } else {
         await api.uploadKnowledgeDocument(file, {
-          meetingId: state.selectedMeetingId,
+          meetingId,
           scope: "personal_kb",
           meetingCallable: true
         });
-      } else {
-        await api.uploadMaterial(state.selectedMeetingId, file);
+        if (meetingId !== state.selectedMeetingId) {
+          if (state.uploadProgress === progress) state.uploadProgress = null;
+          event.target.value = "";
+          return;
+        }
       }
       succeeded += 1;
     } catch (error) {
+      if (meetingId !== state.selectedMeetingId) {
+        if (state.uploadProgress === progress) state.uploadProgress = null;
+        event.target.value = "";
+        return;
+      }
       errors.push(`${file.name}：${error.message}`);
     }
     progress.current = index + 1;
@@ -3844,34 +3936,33 @@ document.addEventListener("change", async (event) => {
   }
 
   progress.status = errors.length ? "error" : "complete";
-  if (context === "knowledge" && succeeded) await loadKnowledgeFromBackend();
+  if (context === "knowledge" && succeeded) {
+    await loadKnowledgeFromBackend();
+    if (meetingId !== state.selectedMeetingId) return;
+  }
   if (context === "vpbuddy-material" && succeeded) {
+    const refreshRevision = meetingMaterialsRevision;
     const [materialList, chatHistory] = await Promise.allSettled([
-      api.listMaterials(state.selectedMeetingId),
-      api.listChatHistory(state.selectedMeetingId)
+      api.listMaterials(meetingId),
+      api.listChatHistory(meetingId)
     ]);
-    if (materialList.status === "fulfilled") {
+    if (meetingId !== state.selectedMeetingId) {
+      if (state.uploadProgress === progress) state.uploadProgress = null;
+      event.target.value = "";
+      return;
+    }
+    if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
       const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
-      for (const uploadedMaterial of uploadedMaterials) {
-        if (!refreshedMaterials.some((item) => item.id === uploadedMaterial.id)) refreshedMaterials.unshift(uploadedMaterial);
-      }
-      replaceArray(materials, refreshedMaterials);
+      replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
     } else {
-      recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: materialList.reason?.message || "unknown" });
+      if (materialList.status === "rejected") {
+        recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: materialList.reason?.message || "unknown" });
+      }
     }
 
     if (chatHistory.status === "fulfilled") {
       applyChatHistory(chatHistory.value);
     } else {
-      for (const uploadedMaterial of uploadedMaterials) {
-        addVpbuddyMessage({
-          time: nowTime(),
-          text: `[上传了材料: ${uploadedMaterial.name}]`,
-          type: "material",
-          source: "material-upload",
-          materialId: uploadedMaterial.id
-        });
-      }
       recordClientLog("warn", "材料已上传，但 VPBuddy 对话记录刷新失败", { message: chatHistory.reason?.message || "unknown" });
     }
     state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
@@ -3879,12 +3970,22 @@ document.addEventListener("change", async (event) => {
     state.showComposerHistory = true;
   }
   if (context === "material" && succeeded) {
+    const refreshRevision = meetingMaterialsRevision;
     try {
-      const payload = await api.listMaterials(state.selectedMeetingId);
-      replaceArray(materials, normalizeMaterialsResponse(payload));
-      state.selectedMaterial = materials.at(-1)?.id || materials[0]?.id || "";
-    } catch {
-      // The successful upload remains on the backend and can be reloaded later.
+      const payload = await api.listMaterials(meetingId);
+      if (meetingId !== state.selectedMeetingId) {
+        if (state.uploadProgress === progress) state.uploadProgress = null;
+        event.target.value = "";
+        return;
+      }
+      if (meetingMaterialsRevision === refreshRevision) {
+        const refreshedMaterials = normalizeMaterialsResponse(payload);
+        replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
+      }
+      state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
+    } catch (error) {
+      if (meetingId !== state.selectedMeetingId) return;
+      recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: error.message });
     }
   }
   setToast(errors.length
