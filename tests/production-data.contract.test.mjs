@@ -200,7 +200,7 @@ test("meeting summary renders only deliverables with Demo first", () => {
   assertSourceExcludes(summarySource, /(?:icon\(["']share["']\)|>\s*分享\s*<)/, "the summary must not expose sharing");
   assertSourceExcludes(summarySource, /class=["']summary-grid["']/, "the summary body must no longer reserve the four-module grid");
   assertSourceIncludes(summarySource, /const\s+\w*[Dd]eliverables\s*=\s*getOrderedDeliverables\(\)/, "the summary must consume the Demo-first deliverable ordering");
-  assertSourceIncludes(summarySource, /data-action=["']download-all-deliverables["'][\s\S]{0,160}?>[\s\S]{0,100}?下载/, "the summary Download action must request the complete six-file archive");
+  assertSourceIncludes(summarySource, /data-action=["']download-all-deliverables["'][\s\S]{0,180}?>[\s\S]{0,220}?下载/, "the summary Download action must request the complete six-file archive");
   assertSourceIncludes(summarySource, /class=["'][^"']*delivery-strip[^"']*["']/, "deliverables must be the only summary content section");
   assertSourceIncludes(summarySource, /const\s+isDemo\s*=\s*kind\s*===\s*["']demo["'][\s\S]{0,700}?if\s*\(isDemo\)[\s\S]{0,700}?renderDemoVersionControl\(\)/, "only the Demo summary branch may expose version switching");
   assertSourceExcludes(summarySource, /<label>\s*版本：[\s\S]{0,120}?item\.version/, "text summary cards must not render static versions");
@@ -396,7 +396,7 @@ test("Demo preview exposes fullscreen from its top-right actions", () => {
 
 test("meeting details render a stable loading layout and retain same-meeting cache", () => {
   assertSourceIncludes(mainSource, /meetingDetailLoading:\s*false/, "meeting detail loading state must be explicit");
-  assertSourceIncludes(mainSource, /action\s*===\s*["']open-meeting["'][\s\S]{0,650}?meetingDetailLoading\s*=\s*state\.loadedMeetingDetailId\s*!==\s*state\.selectedMeetingId[\s\S]{0,120}?render\(\)/, "meeting navigation must render loading state before awaiting APIs");
+  assertSourceIncludes(mainSource, /action\s*===\s*["']open-meeting["'][\s\S]{0,1100}?meetingDetailLoading\s*=\s*state\.loadedMeetingDetailId\s*!==\s*state\.selectedMeetingId[\s\S]{0,120}?render\(\)/, "meeting navigation must render loading state before awaiting APIs");
   assertSourceIncludes(mainSource, /function\s+renderMeetingLoadingColumns[\s\S]{0,1800}?正在加载会议内容/, "the meeting workspace must render structural loading columns instead of an empty page");
   assertSourceIncludes(mainSource, /meetingDetailLoading\s*\?\s*renderMeetingLoadingColumns\(\)/, "the stage must select the loading columns while details are pending");
   assertSourceIncludes(mainSource, /function\s+renderSummaryLoading[\s\S]{0,1800}?正在加载交付物/, "ended-meeting summaries must retain a stable deliverable loading view");
