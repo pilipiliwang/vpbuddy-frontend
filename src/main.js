@@ -380,6 +380,79 @@ function setToast(message, closeModal = true) {
   }, 2600);
 }
 
+function syncDomAttributes(current, next) {
+  for (const attribute of Array.from(current.attributes)) {
+    if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of Array.from(next.attributes)) {
+    if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+  }
+}
+
+function patchDomNode(current, next) {
+  if (!current || !next || current.nodeType !== next.nodeType) {
+    current?.replaceWith(next.cloneNode(true));
+    return;
+  }
+  if (current.nodeType === Node.TEXT_NODE || current.nodeType === Node.COMMENT_NODE) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return;
+  }
+  if (!(current instanceof Element) || !(next instanceof Element) || current.tagName !== next.tagName) {
+    current.replaceWith(next.cloneNode(true));
+    return;
+  }
+
+  const stableFrameKey = current.dataset.stableDemoFrame;
+  if (
+    current.tagName === "IFRAME"
+    && stableFrameKey
+    && stableFrameKey === next.dataset.stableDemoFrame
+    && current.getAttribute("src") === next.getAttribute("src")
+  ) {
+    syncDomAttributes(current, next);
+    return;
+  }
+
+  syncDomAttributes(current, next);
+  patchDomChildren(current, next);
+
+  if (current instanceof HTMLInputElement && next instanceof HTMLInputElement) {
+    if (current.value !== next.value) current.value = next.value;
+    current.checked = next.checked;
+  } else if (current instanceof HTMLTextAreaElement && next instanceof HTMLTextAreaElement) {
+    if (current.value !== next.value) current.value = next.value;
+  } else if (current instanceof HTMLSelectElement && next instanceof HTMLSelectElement) {
+    if (current.value !== next.value) current.value = next.value;
+  }
+}
+
+function patchDomChildren(currentParent, nextParent) {
+  const nextChildren = Array.from(nextParent.childNodes);
+  nextChildren.forEach((nextChild, index) => {
+    const currentChild = currentParent.childNodes[index];
+    if (!currentChild) currentParent.appendChild(nextChild.cloneNode(true));
+    else patchDomNode(currentChild, nextChild);
+  });
+  while (currentParent.childNodes.length > nextChildren.length) {
+    currentParent.lastChild.remove();
+  }
+}
+
+function updateAppMarkup(nextMarkup) {
+  const template = document.createElement("template");
+  template.innerHTML = nextMarkup;
+  const stableFrames = Array.from(app.querySelectorAll("iframe[data-stable-demo-frame]"));
+  const canPreserveFrame = stableFrames.some((currentFrame) => {
+    const key = currentFrame.dataset.stableDemoFrame;
+    const nextFrame = Array.from(template.content.querySelectorAll("iframe[data-stable-demo-frame]"))
+      .find((candidate) => candidate.dataset.stableDemoFrame === key);
+    return nextFrame && currentFrame.getAttribute("src") === nextFrame.getAttribute("src");
+  });
+  if (canPreserveFrame) patchDomChildren(app, template.content);
+  else app.innerHTML = nextMarkup;
+}
+
 function render() {
   const views = {
     login: renderLogin,
@@ -390,7 +463,7 @@ function render() {
     settings: renderSettings
   };
 
-  app.innerHTML = `${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`;
+  updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`);
   requestAnimationFrame(() => {
     updateAnnotationViewport();
     if (state.meetingTitleEditing && !state.meetingTitleSaving) {
@@ -680,11 +753,13 @@ function normalizeDeliverablesResponse(payload) {
 }
 
 function getOrderedDeliverables() {
+  const order = new Map(["demo", "req", "arch", "tasks", "api", "risk"].map((kind, index) => [kind, index]));
   return deliverables
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
-      const demoPriority = Number(right.item.kind === "demo") - Number(left.item.kind === "demo");
-      return demoPriority || left.index - right.index;
+      const leftOrder = order.get(canonicalDeliverableKind(left.item.kind)) ?? order.size;
+      const rightOrder = order.get(canonicalDeliverableKind(right.item.kind)) ?? order.size;
+      return leftOrder - rightOrder || left.index - right.index;
     })
     .map(({ item }) => item);
 }
@@ -704,7 +779,7 @@ function normalizeDemoVersion(raw) {
   const file = String(raw?.file || fallbackFile).trim().split(/[\\/]/).pop() || fallbackFile;
   return {
     version,
-    label: `V${version}`,
+    label: `V${Number.isInteger(version) ? version : String(version).replace(/0+$/, "").replace(/\.$/, "")}`,
     summary: raw?.summary || `Demo 版本 ${version}`,
     createdAt: raw?.created_at || raw?.createdAt || "",
     fileSize: Number(raw?.file_size || raw?.fileSize || 0),
@@ -741,11 +816,41 @@ function getSelectedDemoVersion() {
   return demoVersions.find((item) => item.version === selected) || demoVersions[0] || null;
 }
 
+function getDemoPreviewState(deliverable = deliverables.find((item) => canonicalDeliverableKind(item.kind) === "demo")) {
+  const selected = getSelectedDemoVersion();
+  const versionLabel = selected?.label || normalizeVersionLabel(deliverable?.version) || "V1";
+  const file = selected?.file || "demo_latest.html";
+  const isReady = Boolean(deliverable && ["已完成", "ready", "available", "generated", "stored", "complete", "completed"]
+    .some((status) => String(deliverable.status || "").toLowerCase().includes(status.toLowerCase())));
+  const url = isReady
+    ? `${apiBaseUrl.replace(/\/$/, "")}/docs/${encodeURIComponent(state.selectedMeetingId)}/${encodeURIComponent(file)}?v=${encodeURIComponent(versionLabel)}`
+    : "";
+  return {
+    selected,
+    versionLabel,
+    file,
+    url,
+    frameKey: `${state.selectedMeetingId || "meeting"}:${file}:${versionLabel}`
+  };
+}
+
 function stripAssistantReasoning(value) {
   return String(value || "")
     .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
     .replace(/<\/?think\b[^>]*>/gi, "")
     .trim();
+}
+
+function normalizeCollabQuestions(payload) {
+  const pending = Array.isArray(payload?.pending) ? payload.pending : [];
+  return pending.map((item, index) => ({
+    id: item.qid || `collab-${index + 1}`,
+    time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
+    target: stripAssistantReasoning(item.asked_by || "会议参与者"),
+    question: stripAssistantReasoning(item.question || item.content || ""),
+    reason: stripAssistantReasoning(item.reason || (item.section ? `关联交付物：${item.section}` : "来自后端协同问答")),
+    status: item.status || "待回答"
+  })).filter((item) => item.question);
 }
 
 function normalizeChatMessage(message) {
@@ -1036,15 +1141,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
 
   if (collab.status === "fulfilled") {
     connected = true;
-    const pending = Array.isArray(collab.value?.pending) ? collab.value.pending : [];
-    replaceArray(aiFollowupQuestions, pending.map((item, index) => ({
-      id: item.qid || `collab-${index + 1}`,
-      time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
-      target: item.asked_by || "会议参与者",
-      question: item.question || "",
-      reason: item.section ? `关联交付物：${item.section}` : "来自后端协同问答",
-      status: "待回答"
-    })).filter((item) => item.question));
+    replaceArray(aiFollowupQuestions, normalizeCollabQuestions(collab.value));
   }
 
   if (connected) {
@@ -1356,15 +1453,7 @@ function startMeetingEvents(meetingId) {
 async function refreshMeetingCollab(meetingId) {
   try {
     const payload = await api.getMeetingCollab(meetingId);
-    const pending = Array.isArray(payload?.pending) ? payload.pending : [];
-    replaceArray(aiFollowupQuestions, pending.map((item, index) => ({
-      id: item.qid || `collab-${index + 1}`,
-      time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
-      target: item.asked_by || "会议参与者",
-      question: item.question || "",
-      reason: item.section ? `关联交付物：${item.section}` : "来自后端协同问答",
-      status: "待回答"
-    })).filter((item) => item.question));
+    replaceArray(aiFollowupQuestions, normalizeCollabQuestions(payload));
     render();
   } catch {
     // The rest of the meeting remains usable when collaboration is unavailable.
@@ -2263,7 +2352,7 @@ function renderDemoVersionControl() {
       <span>Demo 版本</span>
       <select class="demo-version-select" aria-label="切换 Demo 版本">
         ${demoVersions.map((item) => `
-          <option value="${item.version}" ${item.version === selected.version ? "selected" : ""}>${escapeHtml(item.label)}${item.summary ? ` · ${escapeHtml(item.summary)}` : ""}</option>
+          <option value="${item.version}" ${item.version === selected.version ? "selected" : ""}>${escapeHtml(item.label)}</option>
         `).join("")}
       </select>
     </label>
@@ -2314,7 +2403,7 @@ function renderDeliverableListPanel() {
       </header>
       <div class="deliverable-stack">
         ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
-          <button class="deliverable-row ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
+          <button class="deliverable-row ${canonicalDeliverableKind(item.kind) === "demo" ? "is-demo" : ""} ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
             ${docBadge(item.type)}
             <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
             ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
@@ -2363,11 +2452,9 @@ function renderMeetingRecords() {
       <div class="record-stream">
         ${meetingRecords.length
           ? meetingRecords.map((item) => `
-            <article class="record-item ${item.tone}">
-              <div>
-                <header><strong>${escapeHtml(item.speaker)}</strong><em>${escapeHtml(item.role)}</em><time>${escapeHtml(item.time)}</time></header>
-                <p>${escapeHtml(item.text)}</p>
-              </div>
+            <article class="record-item">
+              <time>${escapeHtml(item.time)}</time>
+              <p>${escapeHtml(item.text)}</p>
             </article>
           `).join("")
           : renderEmptyState(
@@ -2500,14 +2587,14 @@ function renderDeliverableCanvas() {
   const isTextOnlyDeliverable = ["req", "arch", "tasks", "api", "risk"].includes(deliverableKind);
   const selectedDemo = isDemoDeliverable ? getSelectedDemoVersion() || demoVersions[0] : null;
   const bodyContent = String(current.content || "").trim();
+  const hasTextBody = isTextOnlyDeliverable && Boolean(bodyContent);
   const headerDescription = [selectedDemo?.summary, current.desc, current.subtitle]
     .map((value) => String(value || "").trim())
     .find((value) => value && value !== bodyContent) || "后端生成文档";
   const displayedVersion = selectedDemo?.label || current.version;
   const previewFile = selectedDemo?.file || "demo_latest.html";
-  const demoPreviewUrl = isDemoDeliverable && current.status === "已完成"
-    ? `${apiBaseUrl.replace(/\/$/, "")}/docs/${encodeURIComponent(state.selectedMeetingId)}/${encodeURIComponent(previewFile)}?v=${encodeURIComponent(displayedVersion)}`
-    : "";
+  const demoPreview = isDemoDeliverable ? getDemoPreviewState(current) : null;
+  const demoPreviewUrl = demoPreview?.url || "";
   return `
     <div class="deliverable-head">
       <h2>${escapeHtml(current.name)}（${escapeHtml(current.subtitle)}）</h2>
@@ -2518,15 +2605,18 @@ function renderDeliverableCanvas() {
       </div>
     </div>
     <section class="deliverable-doc ${demoPreviewUrl ? "demo-deliverable-doc" : ""}">
-      <header class="${isTextOnlyDeliverable ? "text-only-deliverable-header" : ""}">
-        ${isTextOnlyDeliverable ? "" : docBadge(current.type)}
-        <div><h3>${escapeHtml(current.name)}</h3><p>${escapeHtml(headerDescription)}</p></div>
-        ${isDemoDeliverable || isTextOnlyDeliverable ? "" : `<span>${escapeHtml(displayedVersion)}</span>`}
-      </header>
+      ${hasTextBody ? "" : `
+        <header class="${isTextOnlyDeliverable ? "text-only-deliverable-header" : ""}">
+          ${isTextOnlyDeliverable ? "" : docBadge(current.type)}
+          <div><h3>${escapeHtml(current.name)}</h3><p>${escapeHtml(headerDescription)}</p></div>
+          ${isDemoDeliverable || isTextOnlyDeliverable ? "" : `<span>${escapeHtml(displayedVersion)}</span>`}
+        </header>
+      `}
       ${demoPreviewUrl
         ? `<iframe
             class="deliverable-demo-preview"
             src="${escapeHtml(demoPreviewUrl)}"
+            data-stable-demo-frame="meeting-demo"
             title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
             sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
             referrerpolicy="no-referrer"
@@ -2594,19 +2684,23 @@ function renderAIPanel() {
       </header>
       <div class="followup-list">
         ${followups.length
-          ? followups.map((item) => `
-            <button class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${item.id}">
-              ${icon("bot", 16)}
-              <span>
-                <strong>${escapeHtml(item.question)}</strong>
-                <em>${escapeHtml(item.time)} · 面向 ${escapeHtml(item.target)} · ${escapeHtml(item.status)}</em>
-                <i>${escapeHtml(item.reason)}</i>
-              </span>
-            </button>
-          `).join("")
+          ? followups.map((item) => {
+            const question = renderMarkdown(stripAssistantReasoning(item.question));
+            const reason = renderMarkdown(stripAssistantReasoning(item.reason));
+            return `
+              <article class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${escapeHtml(item.id)}" role="button" tabindex="0">
+                ${icon("bot", 16)}
+                <div class="followup-content">
+                  <div class="followup-markdown markdown-content">${question}</div>
+                  <div class="followup-meta">${escapeHtml(item.time)} · 面向 ${escapeHtml(item.target)} · ${escapeHtml(item.status)}</div>
+                  <div class="followup-reason markdown-content">${reason}</div>
+                </div>
+              </article>
+            `;
+          }).join("")
           : renderEmptyState(
-              "实时展示Agent协调内容，自主提出会议问题",
-              "会议中的 Agent 协调信息会在这里持续更新。",
+              "实时展示 Agent 协调内容",
+              "自主提出会议问题",
               "compact-empty"
             )}
       </div>
@@ -2647,8 +2741,12 @@ function renderTimeline() {
 }
 
 function renderSummaryLoading(meeting) {
-  const loadingRows = Array.from({ length: 4 }, (_, index) => `
-    <span class="loading-row ${index === 3 ? "short" : ""}"></span>
+  const loadingRows = Array.from({ length: 3 }, (_, index) => `
+    <div class="summary-loading-card">
+      <span class="loading-row short"></span>
+      <span class="loading-row"></span>
+      <span class="loading-row ${index === 2 ? "short" : ""}"></span>
+    </div>
   `).join("");
   return `
     <main class="summary-page" aria-busy="true">
@@ -2659,17 +2757,64 @@ function renderSummaryLoading(meeting) {
         <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
         <div class="summary-loading-actions"><span class="loading-row"></span></div>
       </header>
-      <section class="panel delivery-strip summary-detail-loading">
-        <article class="panel summary-loading-panel" role="status" aria-live="polite">
+      <section class="panel summary-detail-loading">
+        <div class="summary-loading-panel" role="status" aria-live="polite">
           <div class="summary-loading-status">
             <i class="meeting-loading-spinner"></i>
             <strong>正在加载交付物</strong>
             <span>正在同步 Demo 与会议交付文档</span>
           </div>
-          ${loadingRows}
-        </article>
+          <div class="summary-loading-grid">${loadingRows}</div>
+        </div>
       </section>
     </main>
+  `;
+}
+
+function renderSummaryDeliverable(item) {
+  const kind = canonicalDeliverableKind(item.kind);
+  const isDemo = kind === "demo";
+  const content = String(item.content || "").trim();
+  if (isDemo) {
+    const preview = getDemoPreviewState(item);
+    return `
+      <article class="summary-deliverable-card summary-demo-card" data-kind="demo">
+        <header class="summary-deliverable-head">
+          <div>
+            <h3>${escapeHtml(item.name || "Demo")}</h3>
+            <p>${escapeHtml(item.status)}${item.time ? ` · ${escapeHtml(item.time)}` : ""}</p>
+          </div>
+          ${renderDemoVersionControl()}
+        </header>
+        ${preview.url
+          ? `<iframe
+              class="summary-demo-preview"
+              src="${escapeHtml(preview.url)}"
+              data-stable-demo-frame="summary-demo"
+              title="${escapeHtml(`${item.name || "Demo"} ${preview.versionLabel} 预览`)}"
+              sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+              referrerpolicy="no-referrer"
+            ></iframe>`
+          : renderEmptyState(
+              "Demo 暂不可预览",
+              state.demoVersionMessage || `${item.status || "后端尚未生成可用版本"}`,
+              "summary-deliverable-empty"
+            )}
+      </article>
+    `;
+  }
+  return `
+    <article class="summary-deliverable-card summary-text-card" data-kind="${escapeHtml(kind)}" data-has-content="${Boolean(content)}">
+      <header class="summary-deliverable-head">
+        <div>
+          <h3>${escapeHtml(item.name)}</h3>
+          <p>${escapeHtml(item.status)}${item.time ? ` · ${escapeHtml(item.time)}` : ""}</p>
+        </div>
+      </header>
+      ${content
+        ? `<div class="summary-doc-content markdown-content">${renderMarkdown(content)}</div>`
+        : renderEmptyState("正文尚未生成", "后端当前仅返回了该交付物的元数据。", "summary-deliverable-empty")}
+    </article>
   `;
 }
 
@@ -2696,16 +2841,9 @@ function renderSummary() {
         </header>
         <section class="panel delivery-strip">
           <h2>${icon("grid")}交付物</h2>
-          <div>
+          <div class="summary-deliverable-list">
             ${orderedDeliverables.length
-              ? orderedDeliverables.map((item) => `
-                <article class="${state.downloadBusyId === item.id ? "busy" : ""}" data-action="download-deliverable" data-id="${escapeHtml(item.id)}">
-                  ${docBadge(item.type)}
-                  <strong>${escapeHtml(item.name)}${state.downloadBusyId === item.id ? " · 下载中" : ""}</strong>
-                  <p>${escapeHtml(item.desc || item.subtitle || "后端返回的会议交付物。")}</p>
-                  ${canonicalDeliverableKind(item.kind) === "demo" ? renderDemoVersionControl() : ""}
-                </article>
-              `).join("")
+              ? orderedDeliverables.map(renderSummaryDeliverable).join("")
               : renderEmptyState("暂无交付物", "后端尚未返回本会议交付物列表。", "summary-empty")}
           </div>
         </section>
@@ -2854,27 +2992,29 @@ function renderActionModal() {
   }
 
   if (state.modal === "followup-detail") {
+    const questionMarkup = renderMarkdown(stripAssistantReasoning(selectedFollowup?.question));
+    const reasonMarkup = renderMarkdown(stripAssistantReasoning(selectedFollowup?.reason));
     return `
       <div class="modal-backdrop action-backdrop">
         <section class="action-modal panel followup-detail-modal">
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
           <header>
-            <span>${escapeHtml(selectedFollowup.time)}</span>
-            <h2>AI 反问详情</h2>
-            <em>${escapeHtml(selectedFollowup.status)}</em>
+            <span>${escapeHtml(selectedFollowup?.time || "")}</span>
+            <h2>内容详情</h2>
+            <em>${escapeHtml(selectedFollowup?.status || "")}</em>
           </header>
           <article class="detail-question">
-            <strong>建议反问</strong>
-            <p>${escapeHtml(selectedFollowup.question)}</p>
+            <strong>内容</strong>
+            <div class="modal-markdown markdown-content">${questionMarkup}</div>
           </article>
           <div class="lookup-meta">
-            <em>面向 ${escapeHtml(selectedFollowup.target)}</em>
+            <em>面向 ${escapeHtml(selectedFollowup?.target || "会议参与者")}</em>
             <em>会议对话分析</em>
             <em>待主持人确认</em>
           </div>
           <article class="explain-summary">
             <strong>生成原因</strong>
-            <p>${escapeHtml(selectedFollowup.reason)}</p>
+            <div class="modal-markdown markdown-content">${reasonMarkup}</div>
           </article>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
@@ -3761,6 +3901,12 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  const followupAction = event.target.closest?.('[data-action="open-followup"][role="button"]');
+  if (followupAction && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    followupAction.click();
+    return;
+  }
   if (event.target.matches(".stage-title-input")) {
     if (event.key === "Enter") {
       event.preventDefault();
