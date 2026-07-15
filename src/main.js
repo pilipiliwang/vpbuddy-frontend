@@ -1,21 +1,51 @@
 import { createVpbuddyApi } from "./api/client.js";
+import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
+import { renderMarkdown } from "./utils/markdown.js";
+import { createZipBlob } from "./utils/zip.js";
 
 const app = document.querySelector("#app");
 const defaultApiBaseUrl = "http://47.100.182.3:28765";
 const apiBaseUrl = window.localStorage?.getItem("vpbuddy.apiBaseUrl") || window.VPBUDDY_API_BASE_URL || defaultApiBaseUrl;
-const api = createVpbuddyApi({ baseUrl: apiBaseUrl });
+const authTokenKey = "vpbuddy.authToken";
+const authEmailKey = "vpbuddy.authEmail";
+const meetingStatusStorageKey = "vpbuddy.meetingStatuses";
+const getAuthToken = () => window.localStorage?.getItem(authTokenKey) || "";
+const clientLogEntries = [];
+const maxClientLogEntries = 500;
+const meetingStatusCache = readMeetingStatusCache();
+const api = createVpbuddyApi({
+  baseUrl: apiBaseUrl,
+  getToken: getAuthToken,
+  onUnauthorized: () => resetAuthenticatedSession("登录已失效，请重新登录。"),
+  onDiagnostic: ({ level, message, details }) => recordClientLog(level, message, details)
+});
 
 const state = {
   view: "login",
+  authMode: "login",
+  authBusy: false,
+  authError: "",
+  authEmail: window.localStorage?.getItem(authEmailKey) || "",
+  showAccountMenu: false,
   showCreate: false,
   stageTab: "presentation",
-  meetingLeftTab: "materials",
-  selectedKnowledge: "kb-1",
-  selectedMeetingId: "m-1",
-  selectedMaterial: "mat-1",
-  selectedDeliverable: "del-demo",
-  selectedFollowup: "fq-1",
-  selectedExplanation: "exp-1",
+  stageFullscreen: false,
+  meetingDetailLoading: false,
+  loadedMeetingDetailId: "",
+  meetingLeftTab: "records",
+  selectedKnowledge: "",
+  selectedMeetingId: "",
+  meetingTitleEditing: false,
+  meetingTitleDraft: "",
+  meetingTitleSaving: false,
+  meetingTitleSelectOnFocus: false,
+  selectedMaterial: "",
+  selectedDeliverable: "",
+  selectedDemoVersion: "",
+  demoVersionPinned: false,
+  demoVersionMessage: "",
+  selectedFollowup: "",
+  selectedExplanation: "",
   currentSlide: 1,
   activeTool: "cursor",
   annotationColor: "#2f8cff",
@@ -24,6 +54,7 @@ const state = {
   drawingAnnotationId: "",
   textDraft: null,
   composerText: "",
+  chatBusy: false,
   showComposerHistory: false,
   vpbuddyMessages: [],
   fileUploadContext: "material",
@@ -32,6 +63,23 @@ const state = {
   knowledgeLoaded: false,
   knowledgeTotal: null,
   knowledgeMessage: "",
+  uploadProgress: null,
+  presentationUrl: "",
+  presentationMime: "",
+  presentationName: "",
+  recordingStatus: "idle",
+  recordingStartedAt: 0,
+  recordingElapsed: 0,
+  recordingMessage: "尚未开始录制",
+  liveTranscriptId: "",
+  endingMeeting: false,
+  pendingDeleteMeetingId: "",
+  pendingDeleteKnowledgeId: "",
+  deletingKnowledgeId: "",
+  downloadBusyId: "",
+  downloadBusyMode: "",
+  downloadProgress: null,
+  showDeliverableDownloadMenu: false,
   apiBaseUrl,
   settings: {
     apiKey: "",
@@ -40,11 +88,12 @@ const state = {
     model: "MiniMax-M3",
     endpoint: "https://api.minimax.chat/v1",
     apiKeyEnv: "MINIMAX_API_KEY",
+    apiKeyConfigured: false,
     status: "idle",
     message: "尚未测试连接"
   },
   apiStatus: "idle",
-  apiMessage: "演示数据",
+  apiMessage: "尚未登录",
   zoom: 100,
   toast: "",
   modal: ""
@@ -52,221 +101,41 @@ const state = {
 
 let toastTimer = 0;
 let meetingEventSource = null;
-
-const assets = {
-  slide: "assets/slide-esg-solution.png",
-  dashboard: "assets/deliverable-dashboard.png",
-  thumbs: [
-    "assets/thumb-slide-1.png",
-    "assets/thumb-slide-2.png",
-    "assets/thumb-slide-3.png",
-    "assets/thumb-slide-4.png",
-    "assets/thumb-slide-5.png",
-    "assets/thumb-slide-6.png"
-  ]
-};
+let realtimeAsrSession = null;
+let recordingTimer = 0;
+let knowledgeSearchTimer = 0;
+let meetingDetailLoadSequence = 0;
+let materialPreviewLoadSequence = 0;
 
 const user = {
-  name: "VP_User",
-  organization: "企业版",
-  role: "VP"
+  name: "VPBuddy 用户",
+  organization: "",
+  role: ""
 };
 
-const meetings = [
-  {
-    id: "m-1",
-    title: "XX公司-ESG碳管理系统需求沟通会",
-    desc: "产品需求沟通与方案设计讨论",
-    time: "今天 10:00 - 11:30",
-    status: "进行中",
-    cover: "assets/meeting-city.png"
-  },
-  {
-    id: "m-2",
-    title: "供应链减排方案评审会",
-    desc: "供应链减排路径与实施方案评审",
-    time: "今天 14:00 - 15:30",
-    status: "进行中",
-    cover: "assets/meeting-bulb.png"
-  },
-  {
-    id: "m-3",
-    title: "双碳目标数据校验会",
-    desc: "双碳目标数据核对与校验",
-    time: "昨天 15:30 - 17:00",
-    status: "已结束",
-    cover: "assets/meeting-globe.png"
-  },
-  {
-    id: "m-4",
-    title: "能源系统升级项目启动会",
-    desc: "能源系统升级项目启动与分工",
-    time: "今天 09:30 - 10:30",
-    status: "进行中",
-    cover: "assets/meeting-wind.png"
-  },
-  {
-    id: "m-5",
-    title: "ESG报告编制工作会",
-    desc: "ESG报告编制进度与内容确认",
-    time: "05-15 10:00 - 11:30",
-    status: "已结束",
-    cover: "assets/meeting-wave.png"
-  },
-  {
-    id: "m-6",
-    title: "绿色供应商评估标准研讨会",
-    desc: "绿色供应商评估标准讨论与优化",
-    time: "05-14 14:00 - 15:30",
-    status: "已结束",
-    cover: "assets/meeting-forest.png"
-  }
+const meetings = [];
+const materials = [];
+const timeline = [];
+const meetingRecords = [];
+const meetingUnderstanding = [];
+
+const aiFollowupQuestions = [];
+const deliverables = [];
+const demoVersions = [];
+const conceptSources = [];
+
+const deliverableArchiveSpecs = [
+  { kind: "req", label: "需求文档", filename: "需求文档.md" },
+  { kind: "arch", label: "架构文档", filename: "架构文档.md" },
+  { kind: "tasks", label: "任务拆解", filename: "任务拆解.md" },
+  { kind: "api", label: "API设计", filename: "API设计.md" },
+  { kind: "risk", label: "风险分析", filename: "风险分析.md" },
+  { kind: "demo", label: "Demo", filename: "Demo.html" }
 ];
 
-const materials = [
-  { id: "mat-1", name: "ESG碳管理系统方案.pptx", type: "ppt", size: "18.6 MB", time: "10:16", version: "V1.2" },
-  { id: "mat-2", name: "企业碳排放现状分析.pdf", type: "pdf", size: "5.2 MB", time: "10:16", version: "V1.0" },
-  { id: "mat-3", name: "需求调研清单.docx", type: "word", size: "2.1 MB", time: "10:14", version: "V1.1" },
-  { id: "mat-4", name: "系统功能清单.xlsx", type: "excel", size: "36.5 KB", time: "10:12", version: "V1.0" },
-  { id: "mat-5", name: "项目实施计划.docx", type: "word", size: "1.4 MB", time: "10:05", version: "V1.0" }
-];
-
-const timeline = [
-  { time: "10:00", title: "会议开始", desc: "主持人发起会议" },
-  { time: "10:05", title: "上传材料", desc: "上传了 6 个会议材料" },
-  { time: "10:10", title: "AI 提问", desc: "提出了 3 个关键问题" },
-  { time: "10:16", title: "解释材料", desc: "AI 生成材料摘要" },
-  { time: "10:20", title: "确认待办", desc: "沉淀 2 个问题和 1 个材料" }
-];
-
-const meetingRecords = [
-  { time: "10:00:12", speaker: "主持人 · 刘洋", role: "乙方", tone: "host", text: "各位上午好，我们今天主要确认 ESG 碳管理系统的一期建设范围和数据接入方式。" },
-  { time: "10:03:28", speaker: "客户 · 张伟", role: "甲方", tone: "customer", text: "我们希望先把集团、区域、工厂三级的碳排数据统一起来，后续再扩展到供应链。" },
-  { time: "10:06:44", speaker: "产品 · 陈晨", role: "乙方", tone: "team", text: "目前方案里首页会展示总排放、范围一二三、同比环比和预警信息，支持按组织树下钻。" },
-  { time: "10:10:05", speaker: "客户 · 李明", role: "甲方", tone: "customer", text: "该方案如何实现碳排放数据的自动采集？我们现在有 ERP、能耗系统和部分手工台账。" },
-  { time: "10:12:36", speaker: "客户 · 王芳", role: "甲方", tone: "customer", text: "系统如何支持多组织、多层级管理？总部和工厂看到的数据范围需要不一样。" },
-  { time: "10:15:18", speaker: "客户 · 张伟", role: "甲方", tone: "customer", text: "减排路径建议基于哪些数据模型？我们需要知道模型依据和可解释性。" },
-  { time: "10:16:42", speaker: "AI 助手", role: "系统", tone: "ai", text: "已生成 4 条 AI 反问，并关联会议材料与知识库内容，正在沉淀解释材料。" },
-  { time: "10:20:09", speaker: "主持人 · 刘洋", role: "乙方", tone: "host", text: "我们先把数据采集、组织权限和减排模型作为待确认重点，会后输出需求清单和接口草案。" }
-];
-
-const aiFollowupQuestions = [
-  {
-    id: "fq-1",
-    time: "10:11",
-    target: "李明",
-    question: "ERP、能耗系统和手工台账分别由哪个部门维护，是否已有字段清单和接口方式？",
-    reason: "基于客户提到多数据源接入，需确认数据责任人与可连接性。",
-    status: "待发送"
-  },
-  {
-    id: "fq-2",
-    time: "10:13",
-    target: "王芳",
-    question: "总部、区域、工厂三级权限是否需要按查看、填报、审批分别配置？",
-    reason: "基于多组织多层级诉求，需细化角色权限和数据范围。",
-    status: "建议追问"
-  },
-  {
-    id: "fq-3",
-    time: "10:15",
-    target: "张伟",
-    question: "减排路径建议更关注成本、周期还是减排量排序，是否需要多目标对比？",
-    reason: "基于模型可解释性要求，需确认优化目标和业务偏好。",
-    status: "待确认"
-  },
-  {
-    id: "fq-4",
-    time: "10:18",
-    target: "全体",
-    question: "一期是否纳入 Scope 3 供应链数据，还是先聚焦范围一、范围二？",
-    reason: "基于会议范围边界，需避免一期交付范围扩大。",
-    status: "可选追问"
-  }
-];
-
-const deliverables = [
-  { id: "del-demo", name: "交互 Demo", subtitle: "ESG碳管理系统", type: "demo", status: "已完成", time: "10:16", version: "V1.2", desc: "根据会议确认的首页概览、碳排总览、范围排放与预警模块生成的可演示交互原型。" },
-  { id: "del-req", name: "需求清单", subtitle: "功能范围与确认项", type: "word", status: "已完成", time: "10:16", version: "V1.1", desc: "沉淀客户诉求、待确认事项、已确认范围和业务规则，供会后需求评审使用。" },
-  { id: "del-task", name: "任务拆解", subtitle: "研发任务与里程碑", type: "task", status: "已完成", time: "10:14", version: "V1.0", desc: "按产品、数据、接口、前端、后端和测试拆分任务，关联会议结论与负责人。" },
-  { id: "del-tech", name: "技术方案", subtitle: "架构与数据链路", type: "code", status: "已完成", time: "10:12", version: "V1.0", desc: "围绕碳数据采集、核算因子库、组织分层和报表服务生成技术实施建议。" },
-  { id: "del-api", name: "API设计", subtitle: "接口与数据契约", type: "api", status: "已完成", time: "10:08", version: "V0.9", desc: "定义组织、排放源、采集任务、核算结果、预警和报告导出的接口草案。" },
-  { id: "del-summary", name: "会议纪要", subtitle: "结论、待办与引用材料", type: "word", status: "已完成", time: "10:05", version: "V1.0", desc: "记录会议结论、待办事项、材料引用和可追溯的需求演化过程。" }
-];
-
-const conceptSources = [
-  { title: "ISO 14064-1:2018 核算边界", source: "知识库", confidence: "92%" },
-  { title: "企业能耗系统接口字段清单", source: "知识库", confidence: "89%" },
-  { title: "ESG碳管理系统解决方案.pptx 第 3 页", source: "会议材料", confidence: "86%" }
-];
-
-const explanationFindings = [
-  {
-    id: "exp-1",
-    time: "10:16",
-    title: "自动采集链路说明",
-    trigger: "该方案如何实现碳排放数据的自动采集？我们现在有 ERP、能耗系统和部分手工台账。",
-    lookupTargets: ["知识库", "会议材料", "网络标准"],
-    keywords: ["自动采集", "ERP接口", "能耗系统", "数据校验"],
-    status: "已完成索引",
-    summary: "说明 ERP、能耗系统、IoT 设备和人工台账如何进入采集任务，并在核算前完成字段映射与质量校验。",
-    explanation: "该问题需要结合客户现有系统和行业核算要求解释。建议说明为：通过 ERP、能耗系统、IoT 设备与人工台账建立数据连接器，按采集任务配置字段映射、频率和责任人；进入核算前先做单位、缺失值、异常波动和排放源归属校验，再把有效活动数据写入碳排核算模型。",
-    evidence: [
-      { title: "企业能耗系统接口字段清单", source: "知识库", ref: "字段：meter_id、energy_type、reading_time、value", confidence: "89%" },
-      { title: "ESG碳管理系统解决方案.pptx", source: "会议材料", ref: "第 3 页：数据采集 / 碳排放核算", confidence: "86%" },
-      { title: "ISO 14064-1:2018 数据质量要求", source: "网络标准", ref: "组织层面温室气体清单与边界", confidence: "82%" }
-    ]
-  },
-  {
-    id: "exp-2",
-    time: "10:17",
-    title: "多组织多层级权限说明",
-    trigger: "系统如何支持多组织、多层级管理？总部和工厂看到的数据范围需要不一样。",
-    lookupTargets: ["会议材料", "知识库"],
-    keywords: ["组织树", "权限继承", "数据隔离", "工厂分层"],
-    status: "已完成索引",
-    summary: "解释集团、区域、园区、工厂、车间的组织树建模，以及角色权限和组织范围共同过滤数据的方式。",
-    explanation: "该问题需要解释组织模型和权限边界。建议以集团、区域、园区、工厂、车间建立组织树；每条活动数据绑定组织节点和排放源，权限按角色和组织范围共同过滤。总部查看汇总与横向对比，工厂维护本级采集任务和核算结果。",
-    evidence: [
-      { title: "ESG碳管理系统解决方案.pptx", source: "会议材料", ref: "第 4 页：组织层级与权限", confidence: "91%" },
-      { title: "需求调研清单.docx", source: "知识库", ref: "权限范围：总部 / 分子公司 / 工厂", confidence: "87%" }
-    ]
-  },
-  {
-    id: "exp-3",
-    time: "10:18",
-    title: "减排路径模型依据",
-    trigger: "减排路径建议基于哪些数据模型？我们需要知道模型依据和可解释性。",
-    lookupTargets: ["网络资料", "知识库", "会议材料"],
-    keywords: ["基准年", "排放因子", "情景预测", "边际减排成本"],
-    status: "需联网补充",
-    summary: "概括基准年、活动数据、排放因子、情景预测和边际减排成本如何支撑减排路径建议。",
-    explanation: "该问题需要外部方法论与内部数据共同支撑。建议说明为：先确定基准年和组织边界，基于活动数据、排放因子、历史强度指标建立排放预测；再用情景预测比较不同产量、能源结构和减排措施组合，必要时加入边际减排成本来排序减排路径。",
-    evidence: [
-      { title: "行业标杆案例集.pdf", source: "知识库", ref: "减排路径：情景模拟与措施组合", confidence: "84%" },
-      { title: "公开方法论待检索", source: "网络资料", ref: "SBTi / GHG Protocol 相关路径建模", confidence: "待确认" },
-      { title: "企业碳排放现状分析.pdf", source: "会议材料", ref: "历史排放与排放源结构", confidence: "80%" }
-    ]
-  }
-];
-
-const knowledgeDocs = [
-  { id: "kb-1", name: "ESG碳管理系统解决方案.pptx", type: "ppt", size: "18.6 MB", updated: "2024-05-15 10:28" },
-  { id: "kb-2", name: "企业碳排放现状分析.pdf", type: "pdf", size: "5.2 MB", updated: "2024-05-14 16:55" },
-  { id: "kb-3", name: "需求调研清单.docx", type: "word", size: "2.1 MB", updated: "2024-05-14 11:20" },
-  { id: "kb-4", name: "系统功能清单.xlsx", type: "excel", size: "36.5 KB", updated: "2024-05-13 09:42" },
-  { id: "kb-5", name: "行业标杆案例集.pdf", type: "pdf", size: "12.8 MB", updated: "2024-05-12 18:30" },
-  { id: "kb-6", name: "项目实施计划.docx", type: "word", size: "1.4 MB", updated: "2024-05-12 14:08" }
-];
-
-const knowledgePreviewSnippets = {
-  "kb-1": ["系统包含数据采集、碳排放核算、报告披露、减排管理与决策支持五个核心模块。", "一期重点接入 ERP、能耗系统和手工台账，先完成范围一、范围二核算闭环。", "数据进入核算模型前需要经过字段映射、单位换算、缺失值校验和异常波动识别。"],
-  "kb-2": ["企业当前排放源以外购电力、燃料燃烧和生产过程排放为主。", "历史数据存在口径不统一、手工台账分散和因子版本不一致的问题。", "建议先建立基准年清单，再补齐组织边界和排放源归属。"],
-  "kb-3": ["客户关注多组织、多角色权限和多数据源接入的实施路径。", "访谈问题包括数据责任部门、字段清单、接口方式、填报审批流和报告口径。", "需求确认后需要形成可追踪的需求清单和交付范围边界。"],
-  "kb-4": ["功能清单覆盖用户权限、组织边界、活动数据、排放因子、核算任务和报告输出。", "每个功能项需要标记优先级、一期范围、依赖数据源和验收标准。", "系统需支持自定义排放因子、字段映射和数据质量校验规则。"],
-  "kb-5": ["行业案例普遍采用组织树、数据连接器、核算模型和可视化看板组合建设。", "减排路径通常结合基准年、情景预测、措施库和边际减排成本排序。", "标杆企业会将供应链 Scope 3 数据作为二期扩展重点。"],
-  "kb-6": ["项目计划分为需求确认、详细设计、数据接入、核算配置、联调验收和试运行。", "一期建议控制在核心组织边界、核心排放源和关键报表范围内。", "每个阶段需要明确客户责任人、交付物、评审节点和风险项。"]
-};
+const explanationFindings = [];
+const knowledgeDocs = [];
+const knowledgePreviewSnippets = {};
 
 const modelPresets = [
   { id: "minimax-m3", provider: "minimax", label: "MiniMax · MiniMax-M3", model: "MiniMax-M3", baseUrl: "https://api.minimax.chat/v1", apiKeyEnv: "MINIMAX_API_KEY" },
@@ -281,19 +150,21 @@ const modelPresets = [
   { id: "glm-4", provider: "zhipu", label: "智谱 · GLM-4", model: "glm-4", baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKeyEnv: "ZHIPUAI_API_KEY" }
 ];
 
-const todoItems = [
-  ["提供企业现有碳数据相关系统清单及接口文档", "李明", "05-20"],
-  ["确认碳排放核算因子库需求与扩展规则", "王芳", "05-22"],
-  ["输出ESG碳管理系统详细需求规格说明书", "陈晨", "05-25"],
-  ["评审并确认系统原型设计方案", "张伟", "05-27"],
-  ["制定项目实施计划与资源安排", "刘洋", "05-28"]
-];
+const todoItems = [];
+
+const uiVisibility = Object.freeze({
+  settingsNavigation: false,
+  knowledgeDetailPanel: false,
+  explanationMaterials: false,
+  meetingUnderstandingTab: false,
+  meetingMaterialUploadButton: false
+});
 
 const navItems = [
   ["workspace", "工作台", "grid"],
   ["knowledge", "知识库", "book"],
   ["settings", "设置", "settings"]
-];
+].filter(([view]) => view !== "settings" || uiVisibility.settingsNavigation);
 
 const iconPaths = {
   arrowLeft: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
@@ -311,6 +182,7 @@ const iconPaths = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
   invite: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
   lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  maximize: '<path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/>',
   mic: '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>',
   monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>',
   pen: '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
@@ -323,6 +195,7 @@ const iconPaths = {
   settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.1 1.66V21a2 2 0 1 1-4 0v-.09a1.8 1.8 0 0 0-1.1-1.66 1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.66-1.1H3a2 2 0 1 1 0-4h.09A1.8 1.8 0 0 0 4.75 8.8a1.8 1.8 0 0 0-.36-1.98l-.06-.06A2 2 0 1 1 7.16 3.9l.06.06a1.8 1.8 0 0 0 1.98.36h.01A1.8 1.8 0 0 0 10.3 2.7V3a2 2 0 1 1 4 0v-.09a1.8 1.8 0 0 0 1.1 1.66 1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.8 1.8 0 0 0-.36 1.98v.01a1.8 1.8 0 0 0 1.66 1.1H21a2 2 0 1 1 0 4h-.09A1.8 1.8 0 0 0 19.4 15Z"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4"/><path d="m15.4 6.5-6.8 4"/>',
   sparkle: '<path d="M12 3 9.8 8.8 4 11l5.8 2.2L12 19l2.2-5.8L20 11l-5.8-2.2Z"/><path d="M19 3v4"/><path d="M21 5h-4"/>',
+  trash: '<path d="M3 6h18"/><path d="M8 6V4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v2"/><path d="m19 6-1 14c-.1 1.1-1 2-2 2H8c-1 0-1.9-.9-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
   user: '<path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/>',
   zoom: '<path d="M5 12h14"/><path d="M12 5v14"/>'
@@ -341,6 +214,145 @@ function escapeHtml(value) {
     "'": "&#39;"
   })[char]);
 }
+
+function sanitizeLogDetails(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack || ""
+    };
+  }
+  if (typeof value !== "object") return value;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeLogDetails(item, seen));
+
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    result[key] = /authorization|password|token|api[_-]?key|secret/i.test(key)
+      ? "[REDACTED]"
+      : sanitizeLogDetails(item, seen);
+  }
+  return result;
+}
+
+function recordClientLog(level, message, details = {}) {
+  clientLogEntries.push({
+    timestamp: new Date().toISOString(),
+    level: level || "info",
+    message: String(message || ""),
+    details: sanitizeLogDetails(details)
+  });
+  if (clientLogEntries.length > maxClientLogEntries) {
+    clientLogEntries.splice(0, clientLogEntries.length - maxClientLogEntries);
+  }
+}
+
+function readMeetingStatusCache() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(meetingStatusStorageKey) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function meetingStatusCacheId(meetingId) {
+  return `${state.authEmail || "anonymous"}:${meetingId}`;
+}
+
+function getRememberedMeetingStatus(meetingId) {
+  const entry = meetingStatusCache[meetingStatusCacheId(meetingId)];
+  return typeof entry === "string" ? entry : entry?.status || "";
+}
+
+function rememberMeetingStatus(meetingId, status) {
+  if (!meetingId || !status) return;
+  meetingStatusCache[meetingStatusCacheId(meetingId)] = {
+    status,
+    updated_at: new Date().toISOString()
+  };
+  window.localStorage?.setItem(meetingStatusStorageKey, JSON.stringify(meetingStatusCache));
+}
+
+function forgetMeetingStatus(meetingId) {
+  if (!meetingId) return;
+  delete meetingStatusCache[meetingStatusCacheId(meetingId)];
+  window.localStorage?.setItem(meetingStatusStorageKey, JSON.stringify(meetingStatusCache));
+}
+
+function downloadClientLog() {
+  recordClientLog("info", "Client log exported", {
+    view: state.view,
+    meeting_id: state.selectedMeetingId || null
+  });
+
+  const generatedAt = new Date();
+  const payload = {
+    format_version: 1,
+    generated_at: generatedAt.toISOString(),
+    application: {
+      name: "VPBuddy",
+      desktop: Boolean(window.VPBUDDY_DESKTOP),
+      page: `${window.location.origin}${window.location.pathname}`,
+      user_agent: navigator.userAgent,
+      language: navigator.language,
+      viewport: { width: window.innerWidth, height: window.innerHeight }
+    },
+    account: {
+      email: state.authEmail || user.name || ""
+    },
+    backend: {
+      base_url: state.apiBaseUrl,
+      status: state.apiStatus,
+      message: state.apiMessage
+    },
+    session: {
+      view: state.view,
+      meeting_id: state.selectedMeetingId || null,
+      recording_status: state.recordingStatus,
+      recording_elapsed_seconds: state.recordingElapsed,
+      meeting_count: meetings.length,
+      material_count: materials.length,
+      deliverable_count: deliverables.length
+    },
+    events: clientLogEntries
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = generatedAt.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
+  link.href = url;
+  link.download = `VPBuddy-client-${stamp}.log`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  state.showAccountMenu = false;
+  setToast("Log 已下载");
+  render();
+}
+
+window.addEventListener("error", (event) => {
+  recordClientLog("error", "Unhandled window error", {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    error: event.error
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  recordClientLog("error", "Unhandled promise rejection", { reason: event.reason });
+});
+
+recordClientLog("info", "VPBuddy client started", {
+  desktop: Boolean(window.VPBUDDY_DESKTOP),
+  api_base_url: apiBaseUrl
+});
 
 function logo(compact = false) {
   return `
@@ -381,10 +393,22 @@ function render() {
   app.innerHTML = `${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`;
   requestAnimationFrame(() => {
     updateAnnotationViewport();
+    if (state.meetingTitleEditing && !state.meetingTitleSaving) {
+      const titleInput = document.querySelector(".stage-title-input");
+      if (titleInput) {
+        titleInput.focus();
+        if (state.meetingTitleSelectOnFocus) {
+          titleInput.select();
+          state.meetingTitleSelectOnFocus = false;
+        }
+      }
+    }
     if (state.textDraft) {
       const input = document.querySelector(".annotation-text-input");
       input?.focus();
     }
+    const composerHistory = document.querySelector(".composer-history");
+    if (composerHistory) composerHistory.scrollTop = composerHistory.scrollHeight;
   });
 }
 
@@ -397,17 +421,37 @@ function nowTime() {
 }
 
 function pushVpbuddyMessage(text, type = "question") {
-  state.vpbuddyMessages.unshift({ id: createAnnotationId(), time: nowTime(), text, type });
+  addVpbuddyMessage({ id: createAnnotationId(), time: nowTime(), text, type });
   state.showComposerHistory = true;
 }
 
-function getKnowledgeDocsForCurrentTab() {
-  const query = state.knowledgeSearch.trim().toLowerCase();
-  return knowledgeDocs.filter((item) => {
-    if (!query) return true;
-    const haystack = [item.name, item.type, item.size, item.updated].join(" ").toLowerCase();
-    return haystack.includes(query);
+function getVpbuddyMessageKey(message) {
+  if (message?.type === "material" && message?.materialId) return `material:${message.materialId}`;
+  if (message?.id) return `id:${message.id}`;
+  return `fallback:${message?.type || ""}:${message?.time || ""}:${message?.text || ""}`;
+}
+
+function addVpbuddyMessage(message) {
+  if (!message?.text) return false;
+  const key = getVpbuddyMessageKey(message);
+  if (state.vpbuddyMessages.some((item) => getVpbuddyMessageKey(item) === key)) return false;
+  state.vpbuddyMessages.push(message);
+  return true;
+}
+
+function dedupeVpbuddyMessages(messages) {
+  const seen = new Set();
+  return messages.filter((message) => {
+    if (!message?.text) return false;
+    const key = getVpbuddyMessageKey(message);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
+}
+
+function getKnowledgeDocsForCurrentTab() {
+  return knowledgeDocs;
 }
 
 function getSelectedKnowledgeDoc() {
@@ -426,20 +470,6 @@ function upsertMeeting(meeting) {
   else meetings.unshift(meeting);
 }
 
-function createLocalMeeting(input) {
-  const title = input.title.trim();
-  const projectName = input.projectName?.trim();
-  return {
-    id: `local-${Date.now()}`,
-    title,
-    desc: projectName ? `${projectName} · 本地会议` : "本地会议",
-    time: `今天 ${nowTime()} 开始`,
-    status: "进行中",
-    cover: "assets/meeting-city.png",
-    localOnly: true
-  };
-}
-
 function replaceArray(target, next) {
   target.splice(0, target.length, ...next);
 }
@@ -448,11 +478,29 @@ function getSelectedMeeting() {
   return meetings.find((item) => item.id === state.selectedMeetingId) || meetings[0];
 }
 
-function normalizeStatus(value) {
+function normalizeStatus(value, fallback = "已结束") {
   const status = String(value || "").toLowerCase();
-  if (["running", "active", "recording", "live", "进行中"].some((item) => status.includes(item))) return "进行中";
-  if (["done", "ended", "closed", "archived", "complete", "已结束"].some((item) => status.includes(item))) return "已结束";
-  return value || "进行中";
+  if (["running", "active", "recording", "streaming", "in_progress", "live", "open", "进行中"].some((item) => status.includes(item))) return "进行中";
+  if (["done", "ended", "closed", "user_closed", "archived", "complete", "已结束"].some((item) => status.includes(item))) return "已结束";
+  if (["ready", "available", "generated"].some((item) => status.includes(item))) return "已完成";
+  if (["generating", "pending", "draft"].some((item) => status.includes(item))) return "生成中";
+  if (["missing", "not_found"].some((item) => status.includes(item))) return "待生成";
+  if (["failed", "error"].some((item) => status.includes(item))) return "生成失败";
+  return fallback;
+}
+
+function formatBackendDateTime(value, fallback = "") {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
 }
 
 function normalizeMeeting(raw, index = 0) {
@@ -460,16 +508,21 @@ function normalizeMeeting(raw, index = 0) {
   const id = raw.id || raw.meeting_id || stateData.meeting_id || `mtg-${index + 1}`;
   const title = raw.title || raw.name || raw.projectName || raw.project_name || stateData.title || stateData.project_name || `会议 ${index + 1}`;
   const desc = raw.desc || raw.description || raw.objective || stateData.objective || "会议协同与交付生成";
-  const time = raw.time || raw.startedAt || raw.started_at || raw.createdAt || raw.created_at || "进行中";
-  const covers = ["assets/meeting-city.png", "assets/meeting-bulb.png", "assets/meeting-globe.png", "assets/meeting-wind.png", "assets/meeting-wave.png", "assets/meeting-forest.png"];
-
+  const timeValue = raw.time || raw.startedAt || raw.started_at || raw.createdAt || raw.created_at;
+  const time = formatBackendDateTime(timeValue, "时间待后端更新");
+  const explicitStatus = raw.status || raw.phase || raw.lifecycle_status || raw.meeting_status || stateData.status;
+  const hasClosedMarker = Boolean(
+    raw.closed_at || raw.closedAt || raw.ended_at || raw.endedAt || raw.archived_at || raw.archivedAt
+    || stateData.closed_at || stateData.ended_at || raw.closed === true || raw.is_closed === true
+  );
+  const rememberedStatus = getRememberedMeetingStatus(id);
   return {
     id,
     title,
     desc,
     time,
-    status: normalizeStatus(raw.status || raw.phase || stateData.status),
-    cover: raw.cover || covers[index % covers.length]
+    status: hasClosedMarker ? "已结束" : normalizeStatus(explicitStatus, rememberedStatus || "已结束"),
+    cover: raw.cover || ""
   };
 }
 
@@ -494,8 +547,9 @@ function normalizeMaterial(raw, index = 0) {
     id: raw.id || raw.material_id || `mat-${index + 1}`,
     name,
     type: normalizeMaterialType(raw.type || raw.file_type || name.split(".").pop()),
+    contentType: raw.content_type || raw.contentType || raw.mime_type || raw.mimeType || raw.metadata?.content_type || "",
     size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || 0)),
-    time: raw.time || raw.created_at || raw.createdAt || raw.updated_at || nowTime(),
+    time: formatBackendDateTime(raw.time || raw.created_at || raw.createdAt || raw.updated_at, nowTime()),
     version: raw.version || "V1.0"
   };
 }
@@ -506,18 +560,24 @@ function normalizeMaterialsResponse(payload) {
 }
 
 function normalizeKnowledgeDoc(raw, index = 0) {
-  const name = raw.name || raw.filename || raw.title || raw.doc_id || raw.id || `Knowledge ${index + 1}`;
+  const metadata = raw.metadata || {};
+  const rawName = raw.name || raw.filename || raw.title || metadata.source || metadata.filename || raw.doc_id || raw.id || `Knowledge ${index + 1}`;
+  const name = String(rawName).replace(/^upload:/, "");
   return {
     id: raw.id || raw.doc_id || raw.document_id || `kb-${index + 1}`,
     name,
-    type: normalizeMaterialType(raw.type || raw.file_type || raw.kind || name.split(".").pop()),
-    size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || raw.bytes || 0)),
-    updated: raw.updated || raw.updated_at || raw.created_at || raw.createdAt || ""
+    type: normalizeMaterialType(raw.type || raw.file_type || raw.kind || metadata.file_ext || name.split(".").pop()),
+    size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || raw.bytes || metadata.file_size || 0)),
+    updated: formatBackendDateTime(raw.updated || raw.updated_at || raw.created_at || raw.createdAt || metadata.uploaded_at, ""),
+    meetingCallable: String(metadata.meeting_callable ?? "true").toLowerCase() !== "false",
+    scope: metadata.scope || "personal_kb",
+    labels: metadata.labels || "",
+    preview: raw.document || ""
   };
 }
 
 function normalizeKnowledgeResponse(payload) {
-  const list = Array.isArray(payload) ? payload : payload?.documents || payload?.files || payload?.items || payload?.data || [];
+  const list = Array.isArray(payload) ? payload : payload?.docs || payload?.documents || payload?.files || payload?.items || payload?.data || [];
   return list.map(normalizeKnowledgeDoc);
 }
 
@@ -531,11 +591,16 @@ function secondsToTime(seconds) {
 }
 
 function normalizeTranscriptSegment(segment, index = 0) {
-  const speaker = segment.speaker_name || segment.speaker || segment.name || "会议参与者";
+  const speakerId = segment.speaker_id || segment.speakerId || "";
+  const speaker = segment.speaker_name || segment.speaker || segment.name || (speakerId && speakerId !== "UNKNOWN" ? `说话人 ${speakerId}` : "待识别说话人");
   const text = segment.text || segment.cleaned_text || segment.content || segment.message || "";
   const tone = speaker.includes("AI") ? "ai" : speaker.includes("客户") || speaker.includes("甲方") ? "customer" : index === 0 ? "host" : "team";
   return {
-    time: segment.time || secondsToTime(segment.start_sec ?? segment.startSec ?? index * 15),
+    time: segment.time || secondsToTime(
+      segment.start_sec
+      ?? segment.startSec
+      ?? (segment.begin_time !== undefined ? Number(segment.begin_time) / 1000 : index * 15)
+    ),
     speaker,
     role: segment.role || (tone === "customer" ? "甲方" : tone === "ai" ? "系统" : "乙方"),
     tone,
@@ -565,19 +630,47 @@ function normalizeDeliverableType(kind) {
   return map[value] || value || "word";
 }
 
+function canonicalDeliverableKind(kind) {
+  const value = String(kind || "").toLowerCase();
+  const aliases = {
+    requirements: "req",
+    requirement: "req",
+    architecture: "arch",
+    task: "tasks"
+  };
+  return aliases[value] || value;
+}
+
+function normalizeVersionLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.toUpperCase().startsWith("V") ? text.toUpperCase() : `V${text}`;
+}
+
+function normalizeDeliverableStatus(value) {
+  const status = String(value || "").toLowerCase();
+  if (["ready", "available", "generated", "complete", "completed", "stored", "已完成"].some((item) => status.includes(item))) return "已完成";
+  if (["generating", "pending", "draft"].some((item) => status.includes(item))) return "生成中";
+  if (["missing", "not_found"].some((item) => status.includes(item))) return "待生成";
+  if (["failed", "error"].some((item) => status.includes(item))) return "生成失败";
+  return value || "待生成";
+}
+
 function normalizeDeliverable(raw, index = 0) {
   const kind = raw.kind || raw.type || raw.doc_kind;
   const labels = { req: "需求清单", requirements: "需求清单", arch: "技术方案", architecture: "技术方案", tasks: "任务拆解", risk: "风险清单", api: "API设计", demo: "交互 Demo", summary: "会议纪要" };
   const id = raw.id || raw.deliverableId || raw.deliverable_id || `del-${state.selectedMeetingId}-${kind || index + 1}`;
   return {
     id,
+    kind,
     name: raw.name || raw.label || labels[kind] || `交付物 ${index + 1}`,
     subtitle: raw.subtitle || raw.description || "后端生成文档",
     type: normalizeDeliverableType(kind),
-    status: normalizeStatus(raw.status || "已完成"),
-    time: raw.updatedAt || raw.updated_at || raw.createdAt || raw.created_at || nowTime(),
-    version: raw.version ? `V${raw.version}` : "V1.0",
-    desc: raw.desc || raw.description || raw.path || "由后端文档生成接口返回。"
+    status: normalizeDeliverableStatus(raw.status),
+    time: formatBackendDateTime(raw.updatedAt || raw.updated_at || raw.createdAt || raw.created_at, nowTime()),
+    version: normalizeVersionLabel(raw.version) || "V1.0",
+    desc: raw.desc || raw.description || raw.path || "由后端文档生成接口返回。",
+    content: raw.content || ""
   };
 }
 
@@ -586,26 +679,218 @@ function normalizeDeliverablesResponse(payload) {
   return list.map(normalizeDeliverable);
 }
 
-function normalizeChatMessage(message) {
+function getOrderedDeliverables() {
+  return deliverables
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const demoPriority = Number(right.item.kind === "demo") - Number(left.item.kind === "demo");
+      return demoPriority || left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
+function getDefaultDeliverable() {
+  return deliverables.find((item) => item.kind === "demo") || deliverables[0] || null;
+}
+
+function getSelectedDeliverable() {
+  return deliverables.find((item) => item.id === state.selectedDeliverable) || getDefaultDeliverable();
+}
+
+function normalizeDemoVersion(raw) {
+  const version = Number(raw?.version);
+  if (!Number.isFinite(version)) return null;
+  const fallbackFile = `demo_v${version}.html`;
+  const file = String(raw?.file || fallbackFile).trim().split(/[\\/]/).pop() || fallbackFile;
   return {
-    id: message.id || createAnnotationId(),
-    time: message.created_at ? new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : nowTime(),
-    text: message.content || message.message || message.text || "",
-    type: message.role === "assistant" ? "answer" : "question"
+    version,
+    label: `V${version}`,
+    summary: raw?.summary || `Demo 版本 ${version}`,
+    createdAt: raw?.created_at || raw?.createdAt || "",
+    fileSize: Number(raw?.file_size || raw?.fileSize || 0),
+    file
   };
 }
 
+function normalizeDemoVersionsResponse(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.versions || [];
+  const seen = new Set();
+  return list
+    .map(normalizeDemoVersion)
+    .filter((item) => {
+      if (!item || seen.has(item.version)) return false;
+      seen.add(item.version);
+      return true;
+    })
+    .sort((left, right) => right.version - left.version);
+}
+
+function applyDemoVersions(payload) {
+  replaceArray(demoVersions, normalizeDemoVersionsResponse(payload));
+  const selected = Number(state.selectedDemoVersion);
+  const selectionExists = demoVersions.some((item) => item.version === selected);
+  if (!selectionExists) {
+    state.selectedDemoVersion = demoVersions[0]?.version ?? "";
+    state.demoVersionPinned = false;
+  }
+  state.demoVersionMessage = demoVersions.length ? "" : "后端尚未生成 Demo 版本";
+}
+
+function getSelectedDemoVersion() {
+  const selected = Number(state.selectedDemoVersion);
+  return demoVersions.find((item) => item.version === selected) || demoVersions[0] || null;
+}
+
+function stripAssistantReasoning(value) {
+  return String(value || "")
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think\b[^>]*>/gi, "")
+    .trim();
+}
+
+function normalizeChatMessage(message) {
+  const source = message?.assistant_message || message?.user_message || message || {};
+  const messageSource = source.source || "";
+  const materialId = source.material?.material_id || source.material?.id || source.material_id || "";
+  const type = messageSource === "material-upload" ? "material" : source.role === "assistant" || message?.assistant_message ? "answer" : "question";
+  const rawText = source.content || source.message || source.text || "";
+  return {
+    id: source.id || createAnnotationId(),
+    time: source.created_at ? new Date(source.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : nowTime(),
+    text: type === "answer" ? stripAssistantReasoning(rawText) : rawText,
+    type,
+    source: messageSource,
+    materialId
+  };
+}
+
+function normalizeChatHistoryResponse(payload) {
+  const history = Array.isArray(payload) ? payload : payload?.messages || payload?.history || [];
+  return dedupeVpbuddyMessages(history.map(normalizeChatMessage));
+}
+
+function applyChatHistory(payload) {
+  const messages = normalizeChatHistoryResponse(payload);
+  replaceArray(state.vpbuddyMessages, messages);
+  state.showComposerHistory = messages.length > 0;
+  return messages;
+}
+
 function setApiStatus(status, message) {
+  if (state.apiStatus !== status || state.apiMessage !== message) {
+    recordClientLog(status === "error" ? "error" : "info", "Backend status changed", {
+      status,
+      message
+    });
+  }
   state.apiStatus = status;
   state.apiMessage = message;
 }
 
-function hasBackendSession() {
-  return state.apiStatus === "connected" || state.apiStatus === "loading";
+function applyAuthenticatedUser(profile = {}) {
+  const email = profile.email || state.authEmail;
+  state.authEmail = email;
+  user.name = email || "VPBuddy 用户";
+  if (profile.organization) user.organization = profile.organization;
+  if (profile.role) user.role = profile.role;
 }
 
-function shouldUseDemoData() {
-  return !hasBackendSession();
+function resetAuthenticatedSession(message = "") {
+  window.localStorage?.removeItem(authTokenKey);
+  meetingDetailLoadSequence += 1;
+  closeMeetingEvents();
+  resetRecordingState();
+  clearPresentationPreview();
+  for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, todoItems]) {
+    replaceArray(collection, []);
+  }
+  replaceArray(state.vpbuddyMessages, []);
+  state.selectedMeetingId = "";
+  state.selectedMaterial = "";
+  state.selectedDeliverable = "";
+  state.selectedDemoVersion = "";
+  state.demoVersionPinned = false;
+  state.demoVersionMessage = "";
+  state.meetingDetailLoading = false;
+  state.loadedMeetingDetailId = "";
+  state.selectedKnowledge = "";
+  state.showAccountMenu = false;
+  state.showDeliverableDownloadMenu = false;
+  state.downloadBusyMode = "";
+  state.downloadProgress = null;
+  state.view = "login";
+  state.authBusy = false;
+  state.authError = message;
+  state.apiStatus = "idle";
+  state.apiMessage = "尚未登录";
+  render();
+}
+
+async function submitAuthentication() {
+  const email = document.querySelector("[data-field='auth-email']")?.value.trim() || "";
+  const password = document.querySelector("[data-field='auth-password']")?.value || "";
+  state.authEmail = email;
+  state.authError = "";
+
+  if (!email || !email.includes("@")) {
+    state.authError = "请输入有效邮箱。";
+    render();
+    return;
+  }
+  if (password.length < 6) {
+    state.authError = "密码至少需要 6 位。";
+    render();
+    return;
+  }
+
+  state.authBusy = true;
+  render();
+  try {
+    const payload = state.authMode === "register"
+      ? await api.register({ email, password })
+      : await api.login({ email, password });
+    if (!payload?.token) throw new Error("后端未返回登录凭证。");
+    window.localStorage?.setItem(authTokenKey, payload.token);
+    window.localStorage?.setItem(authEmailKey, payload.email || email);
+    applyAuthenticatedUser(payload);
+    state.authBusy = false;
+    state.authError = "";
+    state.view = "workspace";
+    setApiStatus("connected", "已登录，正在加载会议");
+    render();
+    await loadMeetingsFromBackend();
+  } catch (error) {
+    window.localStorage?.removeItem(authTokenKey);
+    state.authBusy = false;
+    state.authError = error?.message || `${state.authMode === "register" ? "注册" : "登录"}失败。`;
+    render();
+  }
+}
+
+async function restoreAuthenticatedSession() {
+  if (!getAuthToken()) return;
+  state.authBusy = true;
+  render();
+  try {
+    const profile = await api.me();
+    applyAuthenticatedUser(profile || {});
+    state.authBusy = false;
+    state.authError = "";
+    state.view = "workspace";
+    setApiStatus("connected", "已登录，正在加载会议");
+    render();
+    await loadMeetingsFromBackend();
+  } catch (error) {
+    if (error?.status === 401 || !getAuthToken()) return;
+    state.authBusy = false;
+    state.view = "workspace";
+    setApiStatus("error", `后端暂时不可用：${error?.message || "连接失败"}`);
+    render();
+  }
+}
+
+function hasBackendSession() {
+  return Boolean(getAuthToken());
 }
 
 function renderEmptyState(title, description = "", modifier = "") {
@@ -628,31 +913,73 @@ async function loadMeetingsFromBackend() {
     if (!meetings.length) state.selectedMeetingId = "";
     setApiStatus("connected", "已连接后端");
   } catch (error) {
-    setApiStatus("mock", "后端未连接，使用演示数据");
+    replaceArray(meetings, []);
+    state.selectedMeetingId = "";
+    setApiStatus("error", `会议列表加载失败：${error.message}`);
   }
   render();
 }
 
 async function loadMeetingDetailFromBackend(meetingId) {
+  const loadSequence = ++meetingDetailLoadSequence;
+  const hasCachedDetail = state.loadedMeetingDetailId === meetingId;
+  state.meetingDetailLoading = !hasCachedDetail;
+  if (!hasCachedDetail) {
+    replaceArray(meetingRecords, []);
+    replaceArray(materials, []);
+    replaceArray(deliverables, []);
+    replaceArray(demoVersions, []);
+    replaceArray(meetingUnderstanding, []);
+    replaceArray(aiFollowupQuestions, []);
+    replaceArray(explanationFindings, []);
+    replaceArray(state.vpbuddyMessages, []);
+    state.selectedMaterial = "";
+    state.selectedDeliverable = "";
+    state.selectedDemoVersion = "";
+    state.demoVersionPinned = false;
+    state.demoVersionMessage = "";
+    state.showComposerHistory = false;
+    state.showDeliverableDownloadMenu = false;
+    clearPresentationPreview();
+  }
+  render();
+
   const results = await Promise.allSettled([
     api.getMeeting(meetingId),
     api.listTranscriptSegments(meetingId),
     api.listMaterials(meetingId),
     api.listDeliverables(meetingId),
-    api.listChatHistory(meetingId)
+    api.listChatHistory(meetingId),
+    api.getMeetingCollab(meetingId),
+    api.listDemoVersions(meetingId)
   ]);
+  if (loadSequence !== meetingDetailLoadSequence) return;
 
   let connected = false;
   let detailHadTranscripts = false;
   let detailHadDeliverables = false;
   let detailHadMaterials = false;
-  const [detail, transcript, materialList, deliverableList, chatHistory] = results;
+  const [detail, transcript, materialList, deliverableList, chatHistory, collab, demoVersionList] = results;
 
   if (detail.status === "fulfilled" && detail.value) {
     connected = true;
     const meeting = normalizeMeeting(detail.value, 0);
     const index = meetings.findIndex((item) => item.id === meetingId);
-    if (index >= 0) meetings[index] = { ...meetings[index], ...meeting, id: meetingId };
+    if (index >= 0) {
+      const current = meetings[index];
+      const detailState = detail.value.state || {};
+      const hasTitle = Boolean(detail.value.title || detail.value.name || detail.value.project_name || detailState.title || detailState.project_name);
+      const hasDescription = Boolean(detail.value.desc || detail.value.description || detail.value.objective || detailState.objective);
+      const hasTime = Boolean(detail.value.time || detail.value.startedAt || detail.value.started_at || detail.value.createdAt || detail.value.created_at);
+      meetings[index] = {
+        ...current,
+        ...meeting,
+        id: meetingId,
+        title: hasTitle ? meeting.title : current.title,
+        desc: hasDescription ? meeting.desc : current.desc,
+        time: hasTime ? meeting.time : current.time
+      };
+    }
 
     const detailTranscripts = normalizeTranscriptResponse(detail.value);
     if (detailTranscripts.length) {
@@ -671,18 +998,29 @@ async function loadMeetingDetailFromBackend(meetingId) {
       detailHadMaterials = true;
       replaceArray(materials, detailMaterials);
     }
+    const detailItems = detail.value?.state?.items || detail.value?.items || [];
+    if (Array.isArray(detailItems)) replaceArray(meetingUnderstanding, detailItems);
   }
 
   if (transcript.status === "fulfilled") {
     connected = true;
     const nextRecords = normalizeTranscriptResponse(transcript.value);
     replaceArray(meetingRecords, nextRecords);
+    const stateItems = transcript.value?.state?.items || [];
+    if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
   }
 
   if (deliverableList.status === "fulfilled") {
     connected = true;
     const nextDeliverables = normalizeDeliverablesResponse(deliverableList.value);
     replaceArray(deliverables, nextDeliverables);
+  }
+
+  if (demoVersionList.status === "fulfilled") {
+    connected = true;
+    applyDemoVersions(demoVersionList.value);
+  } else {
+    state.demoVersionMessage = `Demo 版本加载失败：${demoVersionList.reason?.message || "未知错误"}`;
   }
 
   if (materialList.status === "fulfilled") {
@@ -693,10 +1031,20 @@ async function loadMeetingDetailFromBackend(meetingId) {
 
   if (chatHistory.status === "fulfilled") {
     connected = true;
-    const history = Array.isArray(chatHistory.value) ? chatHistory.value : chatHistory.value?.messages || chatHistory.value?.history || [];
-    const messages = history.map(normalizeChatMessage).filter((item) => item.text);
-    replaceArray(state.vpbuddyMessages, messages.reverse());
-    state.showComposerHistory = messages.length > 0;
+    applyChatHistory(chatHistory.value);
+  }
+
+  if (collab.status === "fulfilled") {
+    connected = true;
+    const pending = Array.isArray(collab.value?.pending) ? collab.value.pending : [];
+    replaceArray(aiFollowupQuestions, pending.map((item, index) => ({
+      id: item.qid || `collab-${index + 1}`,
+      time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
+      target: item.asked_by || "会议参与者",
+      question: item.question || "",
+      reason: item.section ? `关联交付物：${item.section}` : "来自后端协同问答",
+      status: "待回答"
+    })).filter((item) => item.question));
   }
 
   if (connected) {
@@ -709,44 +1057,247 @@ async function loadMeetingDetailFromBackend(meetingId) {
     }
   }
 
-  setApiStatus(connected ? "connected" : "mock", connected ? "已连接后端" : "后端未连接，使用演示数据");
+  if (deliverables.length && !state.selectedDeliverable) state.selectedDeliverable = getDefaultDeliverable().id;
+  const failedCount = results.filter((item) => item.status === "rejected").length;
+  setApiStatus(connected ? "connected" : "error", connected
+    ? failedCount ? `已连接后端，${failedCount} 项会议数据暂不可用` : "已连接后端"
+    : "会议数据加载失败");
+  state.loadedMeetingDetailId = meetingId;
+  state.meetingDetailLoading = false;
   render();
 }
 
 async function loadKnowledgeFromBackend() {
-  const previousApiStatus = state.apiStatus;
   setApiStatus("loading", "同步知识库中");
   state.knowledgeMessage = "";
   render();
   try {
-    const payload = await api.listKnowledgeDocuments(state.selectedMeetingId);
+    const payload = await api.listKnowledgeDocuments();
     const nextDocs = normalizeKnowledgeResponse(payload);
     replaceArray(knowledgeDocs, nextDocs);
     state.knowledgeLoaded = true;
     state.knowledgeTotal = Number.isFinite(Number(payload?.total)) ? Number(payload.total) : nextDocs.length;
-    state.knowledgeMessage = nextDocs.length
-      ? ""
-      : state.knowledgeTotal > 0
-        ? `后端知识库共有 ${state.knowledgeTotal} 个文档，但当前 /api/kb/list 尚未返回文档明细。`
-        : "后端知识库当前没有文档。";
+    state.knowledgeMessage = nextDocs.length ? "" : "后端知识库当前没有文档。";
+    state.knowledgeCallable = Object.fromEntries(nextDocs.map((doc) => [doc.id, doc.meetingCallable]));
     state.selectedKnowledge = nextDocs[0]?.id || "";
     setApiStatus("connected", "已连接后端");
   } catch (error) {
-    if (previousApiStatus === "connected") {
-      replaceArray(knowledgeDocs, []);
-      state.selectedKnowledge = "";
-      state.knowledgeLoaded = true;
-      state.knowledgeTotal = 0;
-      state.knowledgeMessage = "后端知识库接口请求失败，当前不展示演示文档。";
-      setApiStatus("connected", "已连接后端，知识库接口异常");
-    } else {
-      state.knowledgeLoaded = false;
-      state.knowledgeTotal = null;
-      state.knowledgeMessage = "后端知识库未连接，显示演示数据。";
-      setApiStatus("mock", "后端未连接，使用演示数据");
-    }
+    replaceArray(knowledgeDocs, []);
+    state.selectedKnowledge = "";
+    state.knowledgeLoaded = true;
+    state.knowledgeTotal = 0;
+    state.knowledgeMessage = `知识库加载失败：${error.message}`;
+    setApiStatus("error", "知识库接口请求失败");
   }
   render();
+}
+
+async function searchKnowledgeFromBackend() {
+  const query = state.knowledgeSearch.trim();
+  if (!query) {
+    await loadKnowledgeFromBackend();
+    return;
+  }
+  state.knowledgeMessage = "正在搜索个人知识库";
+  render();
+  try {
+    const payload = await api.searchKnowledge({ query, scope: "personal_kb", top_k: 20 });
+    const nextDocs = normalizeKnowledgeResponse(payload?.results || payload);
+    replaceArray(knowledgeDocs, nextDocs);
+    state.knowledgeTotal = Number(payload?.count ?? nextDocs.length);
+    state.selectedKnowledge = nextDocs[0]?.id || "";
+    state.knowledgeMessage = nextDocs.length ? "" : "没有找到相关知识内容。";
+  } catch (error) {
+    replaceArray(knowledgeDocs, []);
+    state.selectedKnowledge = "";
+    state.knowledgeTotal = 0;
+    state.knowledgeMessage = `知识库搜索失败：${error.message}`;
+  }
+  render();
+}
+
+function scheduleKnowledgeSearch() {
+  if (knowledgeSearchTimer) window.clearTimeout(knowledgeSearchTimer);
+  knowledgeSearchTimer = window.setTimeout(() => {
+    knowledgeSearchTimer = 0;
+    void searchKnowledgeFromBackend();
+  }, 350);
+}
+
+function clearPresentationPreview() {
+  materialPreviewLoadSequence += 1;
+  if (state.presentationUrl.startsWith("blob:")) URL.revokeObjectURL(state.presentationUrl);
+  state.presentationUrl = "";
+  state.presentationMime = "";
+  state.presentationName = "";
+}
+
+function formatRecordingTime(totalSeconds) {
+  const value = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = String(Math.floor(value / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((value % 3600) / 60)).padStart(2, "0");
+  const seconds = String(value % 60).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function updateRecordingTimer() {
+  if (!state.recordingStartedAt) return;
+  state.recordingElapsed = Math.floor((Date.now() - state.recordingStartedAt) / 1000);
+  const timer = document.querySelector(".stage-title .timer");
+  if (timer) timer.textContent = formatRecordingTime(state.recordingElapsed);
+}
+
+function startRecordingTimer() {
+  stopRecordingTimer();
+  state.recordingStartedAt = Date.now() - state.recordingElapsed * 1000;
+  updateRecordingTimer();
+  recordingTimer = window.setInterval(updateRecordingTimer, 1000);
+}
+
+function stopRecordingTimer() {
+  if (recordingTimer) window.clearInterval(recordingTimer);
+  recordingTimer = 0;
+  updateRecordingTimer();
+  state.recordingStartedAt = 0;
+}
+
+function resetRecordingState() {
+  stopRecordingTimer();
+  void realtimeAsrSession?.close();
+  realtimeAsrSession = null;
+  state.recordingStatus = "idle";
+  state.recordingStartedAt = 0;
+  state.recordingElapsed = 0;
+  state.recordingMessage = "尚未开始录制";
+  state.liveTranscriptId = "";
+}
+
+function appendRealtimeTranscript(message) {
+  const next = {
+    ...normalizeTranscriptSegment(message, meetingRecords.length),
+    id: state.liveTranscriptId || createAnnotationId(),
+    live: !message.is_sentence_end
+  };
+  if (!next.text) return;
+  const last = meetingRecords.at(-1);
+  if (last?.live && last.id === next.id) meetingRecords[meetingRecords.length - 1] = next;
+  else meetingRecords.push(next);
+  state.liveTranscriptId = message.is_sentence_end ? "" : next.id;
+  if (state.meetingLeftTab === "records") render();
+}
+
+async function startRealtimeRecording() {
+  const meetingId = state.selectedMeetingId;
+  if (!meetingId || state.recordingStatus === "starting" || state.recordingStatus === "recording") return;
+  state.recordingStatus = "starting";
+  state.recordingMessage = "正在连接麦克风与实时转写";
+  render();
+  try {
+    realtimeAsrSession = createRealtimeAsrSession({
+      baseUrl: apiBaseUrl,
+      meetingId,
+      getToken: getAuthToken,
+      onTranscript: appendRealtimeTranscript,
+      onStatus: (event) => {
+        if (event.status === "recording") {
+          state.recordingStatus = "recording";
+          state.recordingMessage = "实时录音与转写中";
+          startRecordingTimer();
+          render();
+        }
+        if (event.status === "paused") {
+          stopRecordingTimer();
+          state.recordingStatus = "paused";
+          state.recordingMessage = "录制已暂停，会议和转写连接保持中";
+          render();
+        }
+      },
+      onComplete: () => {
+        state.recordingMessage = "本次录音转写已完成";
+        void refreshTranscript(meetingId, { notify: false });
+      },
+      onError: (error) => {
+        state.recordingStatus = "error";
+        state.recordingMessage = error.message || "实时录音连接失败";
+        stopRecordingTimer();
+        render();
+      }
+    });
+    let startupTimer = 0;
+    try {
+      await Promise.race([
+        realtimeAsrSession.start(),
+        new Promise((_, reject) => {
+          startupTimer = window.setTimeout(() => reject(new Error("麦克风授权或实时转写连接超时")), 15000);
+        })
+      ]);
+    } finally {
+      if (startupTimer) window.clearTimeout(startupTimer);
+    }
+  } catch (error) {
+    await realtimeAsrSession?.close();
+    realtimeAsrSession = null;
+    state.recordingStatus = "error";
+    state.recordingMessage = error.message || "开始录制失败";
+    stopRecordingTimer();
+    setToast(`开始录制失败：${state.recordingMessage}`, false);
+    render();
+  }
+}
+
+async function pauseRealtimeRecording() {
+  if (state.recordingStatus !== "recording" || !realtimeAsrSession) return;
+  state.recordingStatus = "pausing";
+  state.recordingMessage = "正在暂停录制";
+  render();
+  try {
+    await realtimeAsrSession.pause();
+    setToast("录制已暂停，会议记录已保留");
+  } catch (error) {
+    state.recordingStatus = realtimeAsrSession?.isRecording() ? "recording" : "error";
+    state.recordingMessage = error.message || "暂停录制失败";
+    if (state.recordingStatus === "recording") startRecordingTimer();
+    setToast(`暂停录制失败：${state.recordingMessage}`, false);
+    render();
+    throw error;
+  }
+}
+
+async function resumeRealtimeRecording() {
+  if (state.recordingStatus !== "paused" || !realtimeAsrSession) return;
+  state.recordingStatus = "resuming";
+  state.recordingMessage = "正在恢复录制";
+  render();
+  try {
+    await realtimeAsrSession.resume();
+    setToast("录制已继续");
+  } catch (error) {
+    state.recordingStatus = realtimeAsrSession?.isPaused() ? "paused" : "error";
+    state.recordingMessage = error.message || "继续录制失败";
+    setToast(`继续录制失败：${state.recordingMessage}`, false);
+    render();
+    throw error;
+  }
+}
+
+async function stopRealtimeRecording({ notifyBackend = false } = {}) {
+  if (!state.selectedMeetingId || !["starting", "recording", "paused", "pausing", "resuming", "error"].includes(state.recordingStatus)) return;
+  const meetingId = state.selectedMeetingId;
+  state.recordingStatus = "stopping";
+  state.recordingMessage = "正在停止录音并完成转写";
+  render();
+  const tasks = [];
+  if (realtimeAsrSession) tasks.push(realtimeAsrSession.stop());
+  if (notifyBackend) tasks.push(api.stopRecording(meetingId));
+  const results = await Promise.allSettled(tasks);
+  realtimeAsrSession = null;
+  stopRecordingTimer();
+  const failure = results.find((item) => item.status === "rejected");
+  state.recordingStatus = failure ? "error" : "stopped";
+  state.recordingMessage = failure ? `停止录制异常：${failure.reason?.message || "未知错误"}` : "录音已停止";
+  if (!failure) await refreshTranscript(meetingId, { notify: false });
+  render();
+  if (failure) throw failure.reason;
 }
 
 function closeMeetingEvents() {
@@ -757,68 +1308,136 @@ function closeMeetingEvents() {
 }
 
 function startMeetingEvents(meetingId) {
-  if (!window.EventSource) return;
   closeMeetingEvents();
   try {
-    meetingEventSource = new EventSource(api.eventsUrl(meetingId));
-    meetingEventSource.addEventListener("transcript-segment", (event) => {
-      const segment = normalizeTranscriptSegment(JSON.parse(event.data || "{}"), meetingRecords.length);
-      if (segment.text) {
-        meetingRecords.push(segment);
-        render();
+    meetingEventSource = connectAuthenticatedSse({
+      baseUrl: apiBaseUrl,
+      meetingId,
+      getToken: getAuthToken,
+      onEvent: (event) => {
+        if (meetingId !== state.selectedMeetingId) return;
+        if (event.type === "chat-message") {
+          const message = normalizeChatMessage(event.data || {});
+          if (addVpbuddyMessage(message)) {
+            state.showComposerHistory = true;
+            render();
+          }
+        }
+        if (event.type === "collab-update") void refreshMeetingCollab(meetingId);
+        if (event.type === "doc-update" || event.type === "demo-new-version") void refreshDeliverables(meetingId);
+        if (event.type === "recording-disconnected") {
+          state.recordingStatus = "error";
+          state.recordingMessage = "录音连接已断开";
+          stopRecordingTimer();
+          render();
+        }
+        if (event.type === "meeting-complete") {
+          const meeting = getSelectedMeeting();
+          if (meeting) {
+            meeting.status = "已结束";
+            rememberMeetingStatus(meeting.id, meeting.status);
+          }
+          stopRecordingTimer();
+          void refreshDeliverables(meetingId);
+          setToast("会议已完成，交付物和记录正在同步");
+          render();
+        }
+      },
+      onError: (error) => {
+        if (meetingId === state.selectedMeetingId) state.apiMessage = `实时事件连接异常：${error.message}`;
       }
     });
-    meetingEventSource.addEventListener("chat-message", (event) => {
-      const message = normalizeChatMessage(JSON.parse(event.data || "{}"));
-      if (message.text) {
-        state.vpbuddyMessages.unshift(message);
-        state.showComposerHistory = true;
-        render();
-      }
-    });
-    meetingEventSource.addEventListener("meeting-complete", () => {
-      const meeting = getSelectedMeeting();
-      if (meeting) meeting.status = "已结束";
-      setToast("会议已完成，交付物和记录已同步");
-    });
-  } catch {
+  } catch (error) {
     closeMeetingEvents();
+    state.apiMessage = `实时事件连接失败：${error.message}`;
   }
 }
 
+async function refreshMeetingCollab(meetingId) {
+  try {
+    const payload = await api.getMeetingCollab(meetingId);
+    const pending = Array.isArray(payload?.pending) ? payload.pending : [];
+    replaceArray(aiFollowupQuestions, pending.map((item, index) => ({
+      id: item.qid || `collab-${index + 1}`,
+      time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
+      target: item.asked_by || "会议参与者",
+      question: item.question || "",
+      reason: item.section ? `关联交付物：${item.section}` : "来自后端协同问答",
+      status: "待回答"
+    })).filter((item) => item.question));
+    render();
+  } catch {
+    // The rest of the meeting remains usable when collaboration is unavailable.
+  }
+}
+
+async function refreshDeliverables(meetingId) {
+  const [deliverableResult, demoVersionResult] = await Promise.allSettled([
+    api.listDeliverables(meetingId),
+    api.listDemoVersions(meetingId)
+  ]);
+  if (meetingId !== state.selectedMeetingId) return;
+  if (deliverableResult.status === "fulfilled") {
+    replaceArray(deliverables, normalizeDeliverablesResponse(deliverableResult.value));
+    if (!deliverables.some((item) => item.id === state.selectedDeliverable)) state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+  }
+  if (demoVersionResult.status === "fulfilled") {
+    applyDemoVersions(demoVersionResult.value);
+  } else {
+    state.demoVersionMessage = `Demo 版本刷新失败：${demoVersionResult.reason?.message || "未知错误"}`;
+  }
+  render();
+}
+
+async function refreshTranscript(meetingId, { notify = true } = {}) {
+  try {
+    const payload = await api.listTranscriptSegments(meetingId);
+    if (meetingId !== state.selectedMeetingId) return;
+    replaceArray(meetingRecords, normalizeTranscriptResponse(payload));
+    const stateItems = payload?.state?.items || [];
+    if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
+    if (notify) setToast("会议记录已从后端刷新");
+  } catch (error) {
+    if (notify) setToast(`会议记录刷新失败：${error.message}`, false);
+  }
+  render();
+}
+
 async function sendVpbuddyChatMessage(text) {
-  pushVpbuddyMessage(text, "question");
+  if (state.chatBusy) return;
+  if (!text.trim()) {
+    setToast("请输入要发送的问题", false);
+    render();
+    return;
+  }
+  state.chatBusy = true;
   state.composerText = "";
   render();
 
   try {
     const response = await api.sendChat(state.selectedMeetingId, text);
+    const userMessage = normalizeChatMessage(response?.user_message || { content: text, role: "user" });
     const answer = normalizeChatMessage(response);
-    if (answer.text) state.vpbuddyMessages.unshift(answer);
+    addVpbuddyMessage(userMessage);
+    addVpbuddyMessage(answer);
+    state.showComposerHistory = true;
     setApiStatus("connected", "已连接后端");
     setToast("问题已发送给 VPBuddy");
-  } catch {
-    setApiStatus("mock", "后端未连接，消息已保存到本地记录");
-    setToast("问题已保存到本地记录，后端连接后可同步");
+  } catch (error) {
+    state.composerText = text;
+    setToast(`问题发送失败：${error.message}`, false);
+  } finally {
+    state.chatBusy = false;
   }
   render();
 }
 
 function getSettingsPayload() {
-  const preset = getSelectedModelPreset();
   return {
     provider: state.settings.provider,
     model: state.settings.model,
     base_url: state.settings.endpoint.trim(),
-    api_key: state.settings.apiKey.trim(),
-    api_key_env: state.settings.apiKeyEnv,
-    hermes: {
-      model: state.settings.model,
-      base_url: state.settings.endpoint.trim(),
-      api_key_env: state.settings.apiKeyEnv,
-      openai_compatible: true
-    },
-    preset: preset.id
+    api_key: state.settings.apiKey.trim()
   };
 }
 
@@ -864,28 +1483,64 @@ function saveBackendApiBase() {
   window.setTimeout(() => window.location.reload(), 600);
 }
 
+async function loadAISettings() {
+  state.settings.status = "idle";
+  state.settings.message = "正在读取后端 AI 配置";
+  render();
+  try {
+    const payload = await api.getAISettings();
+    const preset = modelPresets.find((item) => item.provider === payload?.provider && item.model === payload?.model)
+      || modelPresets.find((item) => item.model === payload?.model)
+      || getSelectedModelPreset();
+    state.settings = {
+      ...state.settings,
+      apiKey: "",
+      apiKeyConfigured: Boolean(payload?.api_key_configured),
+      modelPreset: preset.id,
+      provider: payload?.provider || preset.provider,
+      model: payload?.model || preset.model,
+      endpoint: payload?.base_url || preset.baseUrl,
+      apiKeyEnv: preset.apiKeyEnv,
+      status: "idle",
+      message: payload?.api_key_configured
+        ? `后端已保存凭证 ${payload.api_key_masked || ""}`.trim()
+        : "后端尚未配置 AI 凭证"
+    };
+  } catch (error) {
+    state.settings.status = "error";
+    state.settings.message = `AI 配置读取失败：${error.message}`;
+  }
+  render();
+}
+
 async function testAISettings() {
   updateSettingsFromInputs();
   state.settings.status = "testing";
   state.settings.message = "正在调用后端测试接口";
   render();
   try {
-    await api.testAIConnection(getSettingsPayload());
+    const result = await api.testAIConnection();
+    if (!result?.connected) throw new Error(result?.error || "后端未能连接所配置的 AI 服务");
     state.settings.status = "connected";
-    state.settings.message = "后端测试接口返回成功";
-    setApiStatus("connected", "已连接后端");
+    state.settings.message = `连接成功${result.model ? `：${result.model}` : ""}`;
     setToast("AI 连接测试通过");
   } catch (error) {
     state.settings.status = "error";
-    state.settings.message = `后端测试接口调用失败：${error.message}`;
-    setApiStatus("mock", "后端设置接口未接通");
-    setToast("AI 连接测试失败，后端接口未接通");
+    state.settings.message = `AI 连接测试失败：${error.message}`;
+    setToast("AI 连接测试失败", false);
   }
   render();
 }
 
 async function saveAISettings() {
   updateSettingsFromInputs();
+  if (!state.settings.apiKey.trim()) {
+    state.settings.status = "error";
+    state.settings.message = "为避免清空后端已有凭证，请输入 API Key 后再保存。";
+    setToast("请输入 API Key", false);
+    render();
+    return;
+  }
   state.settings.status = "saving";
   state.settings.message = "正在调用后端保存接口";
   render();
@@ -898,8 +1553,58 @@ async function saveAISettings() {
   } catch (error) {
     state.settings.status = "error";
     state.settings.message = `后端保存接口调用失败：${error.message}`;
-    setApiStatus("mock", "后端设置接口未接通");
-    setToast("AI 设置保存失败，后端接口未接通");
+    setToast("AI 设置保存失败", false);
+  }
+  render();
+}
+
+function beginMeetingTitleEdit() {
+  const meeting = getSelectedMeeting();
+  if (!meeting || state.meetingDetailLoading || state.meetingTitleSaving) return;
+  state.meetingTitleEditing = true;
+  state.meetingTitleDraft = meeting.title || "";
+  state.meetingTitleSelectOnFocus = true;
+  render();
+}
+
+function resetMeetingTitleEditState() {
+  state.meetingTitleEditing = false;
+  state.meetingTitleDraft = "";
+  state.meetingTitleSaving = false;
+  state.meetingTitleSelectOnFocus = false;
+}
+
+function cancelMeetingTitleEdit() {
+  resetMeetingTitleEditState();
+  render();
+}
+
+async function saveMeetingTitle() {
+  const meeting = getSelectedMeeting();
+  const nextTitle = state.meetingTitleDraft.trim();
+  if (!meeting || state.meetingTitleSaving || !state.meetingTitleEditing) return;
+  if (!nextTitle) {
+    setToast("会议名称不能为空", false);
+    state.meetingTitleSelectOnFocus = true;
+    render();
+    return;
+  }
+  if (nextTitle === meeting.title) {
+    cancelMeetingTitleEdit();
+    return;
+  }
+
+  state.meetingTitleSaving = true;
+  render();
+  try {
+    const response = await api.updateMeeting(meeting.id, { project_name: nextTitle });
+    meeting.title = String(response?.project_name || nextTitle).trim() || nextTitle;
+    resetMeetingTitleEditState();
+    setToast("会议名称已保存到后端");
+  } catch (error) {
+    state.meetingTitleSaving = false;
+    state.meetingTitleSelectOnFocus = false;
+    setToast(`会议名称保存失败：${error.message}`, false);
   }
   render();
 }
@@ -913,30 +1618,222 @@ async function startNewMeetingFromForm() {
     return;
   }
 
-  const input = { title, name: title, projectName, project_name: projectName };
-  let meeting = null;
-  let connected = false;
+  try {
+    const payload = await api.createMeeting({ projectName: title, audioSource: "web" });
+    const meeting = {
+      ...normalizeMeeting(payload?.meeting || payload, 0),
+      title,
+      desc: projectName || "会议协同与交付生成",
+      status: "进行中"
+    };
+    rememberMeetingStatus(meeting.id, meeting.status);
+    upsertMeeting(meeting);
+    state.selectedMeetingId = meeting.id;
+    state.showCreate = false;
+    state.view = "meeting";
+    state.stageTab = "presentation";
+    state.meetingLeftTab = "records";
+    state.meetingDetailLoading = state.loadedMeetingDetailId !== meeting.id;
+    resetRecordingState();
+    setApiStatus("connected", "新会议已由后端创建");
+    render();
+    startMeetingEvents(meeting.id);
+    await loadMeetingDetailFromBackend(meeting.id);
+  } catch (error) {
+    setToast(`会议创建失败：${error.message}`, false);
+    setApiStatus("error", "会议创建失败");
+    render();
+  }
+}
+
+async function endCurrentMeeting() {
+  const meeting = getSelectedMeeting();
+  if (!meeting || state.endingMeeting) return;
+  state.endingMeeting = true;
+  render();
+  try {
+    const hadRealtimeSession = Boolean(realtimeAsrSession);
+    let finalizedByRealtime = false;
+    if (["starting", "recording", "paused", "pausing", "resuming", "error"].includes(state.recordingStatus)) {
+      try {
+        await stopRealtimeRecording();
+        finalizedByRealtime = hadRealtimeSession;
+      } catch (recordingError) {
+        recordClientLog("error", "Realtime recording stop failed; falling back to meeting close", {
+          meeting_id: meeting.id,
+          error: recordingError?.message || String(recordingError)
+        });
+      }
+    }
+    if (!finalizedByRealtime) await api.archiveMeeting(meeting.id);
+    meeting.status = "已结束";
+    rememberMeetingStatus(meeting.id, meeting.status);
+    state.endingMeeting = false;
+    closeMeetingEvents();
+    state.view = "summary";
+    setToast("会议已结束，后端正在生成交付物");
+    render();
+    await refreshDeliverables(meeting.id);
+  } catch (error) {
+    state.endingMeeting = false;
+    setToast(`结束会议失败：${error.message}`, false);
+    render();
+  }
+}
+
+async function deleteMeetingById(meetingId) {
+  const meeting = meetings.find((item) => item.id === meetingId);
+  if (!meeting) return;
+  try {
+    await api.deleteMeeting(meetingId);
+    const index = meetings.findIndex((item) => item.id === meetingId);
+    if (index >= 0) meetings.splice(index, 1);
+    forgetMeetingStatus(meetingId);
+    if (state.selectedMeetingId === meetingId) {
+      state.selectedMeetingId = meetings[0]?.id || "";
+      resetRecordingState();
+      closeMeetingEvents();
+    }
+    if (state.loadedMeetingDetailId === meetingId) state.loadedMeetingDetailId = "";
+    setToast("会议已删除");
+  } catch (error) {
+    setToast(`会议删除失败：${error.message}`, false);
+  }
+  render();
+}
+
+function saveApiDownload(download, fallbackName) {
+  if (!download?.blob) throw new Error("后端未返回可下载文件");
+  const url = URL.createObjectURL(download.blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = download.filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function downloadCurrentDeliverable(id) {
+  if (state.downloadBusyMode || state.downloadBusyId) return;
+  const current = deliverables.find((item) => item.id === id) || deliverables[0];
+  if (!current?.kind) return;
+  const kind = canonicalDeliverableKind(current.kind);
+  const spec = deliverableArchiveSpecs.find((item) => item.kind === kind);
+  state.showDeliverableDownloadMenu = false;
+  state.downloadBusyMode = "single";
+  state.downloadBusyId = current.id;
+  render();
+  try {
+    const download = await api.downloadDeliverable(state.selectedMeetingId, kind);
+    saveApiDownload(download, spec?.filename || `${kind}.${kind === "demo" ? "html" : "md"}`);
+    setToast(`${current.name} 已开始下载`);
+  } catch (error) {
+    setToast(`交付物下载失败：${error.message}`, false);
+  } finally {
+    state.downloadBusyId = "";
+    state.downloadBusyMode = "";
+  }
+  render();
+}
+
+async function downloadAllDeliverables() {
+  if (state.downloadBusyMode || !state.selectedMeetingId) return;
+  const progress = { current: 0, total: deliverableArchiveSpecs.length };
+  state.showDeliverableDownloadMenu = false;
+  state.downloadBusyMode = "all";
+  state.downloadProgress = progress;
+  render();
 
   try {
-    const payload = await api.createMeeting(input);
-    meeting = normalizeMeeting(payload?.meeting || payload, 0);
-    meeting = { ...meeting, title, desc: projectName || "后端已创建的实时会议" };
-    connected = true;
-  } catch {
-    meeting = createLocalMeeting(input);
+    const results = await Promise.all(deliverableArchiveSpecs.map(async (spec) => {
+      try {
+        const download = await api.downloadDeliverable(state.selectedMeetingId, spec.kind);
+        return {
+          ok: true,
+          name: spec.filename,
+          data: new Uint8Array(await download.blob.arrayBuffer())
+        };
+      } catch (error) {
+        return { ok: false, label: spec.label, error };
+      } finally {
+        progress.current += 1;
+        render();
+      }
+    }));
+
+    const failed = results.filter((item) => !item.ok);
+    if (failed.length) {
+      throw new Error(`以下文件暂不可用：${failed.map((item) => item.label).join("、")}`);
+    }
+
+    const archive = createZipBlob(results.map((item) => ({ name: item.name, data: item.data })));
+    const meeting = getSelectedMeeting();
+    const safeMeetingName = String(meeting?.title || state.selectedMeetingId)
+      .replace(/[<>:"/\\|?*]+/g, "-")
+      .slice(0, 80);
+    saveApiDownload({
+      blob: archive,
+      filename: `${safeMeetingName}-全部交付物.zip`
+    }, `${safeMeetingName}-全部交付物.zip`);
+    setToast("六份交付物已打包并开始下载");
+  } catch (error) {
+    setToast(`全部交付物下载失败：${error.message}`, false);
+  } finally {
+    state.downloadBusyMode = "";
+    state.downloadProgress = null;
+    render();
   }
+}
 
-  upsertMeeting(meeting);
-  state.selectedMeetingId = meeting.id;
-  state.showCreate = false;
-  state.view = "meeting";
-  state.stageTab = "presentation";
-  state.meetingLeftTab = "materials";
-  setApiStatus(connected ? "connected" : "mock", connected ? "新会议已由后端创建" : "后端未连接，新会议已在本地开启");
+const materialPreviewMimeByExtension = Object.freeze({
+  pdf: "application/pdf",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp"
+});
+
+function normalizePreviewMime(value) {
+  const mime = String(value || "").split(";", 1)[0].trim().toLowerCase();
+  if (mime === "application/pdf") return mime;
+  if (["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"].includes(mime)) return mime;
+  return "";
+}
+
+function resolveMaterialPreviewMime(material, download) {
+  const explicitMime = [download?.contentType, download?.blob?.type, material?.contentType]
+    .map(normalizePreviewMime)
+    .find(Boolean);
+  if (explicitMime) return explicitMime;
+  const extension = String(material?.name || download?.filename || "").split(".").pop().toLowerCase();
+  return materialPreviewMimeByExtension[extension] || (material?.type === "pdf" ? "application/pdf" : "");
+}
+
+async function loadMaterialPreview(materialId) {
+  const material = materials.find((item) => item.id === materialId);
+  if (!material) return;
+  clearPresentationPreview();
+  const loadSequence = materialPreviewLoadSequence;
+  state.presentationName = material.name;
+  try {
+    const download = await api.downloadMaterial(materialId);
+    if (loadSequence !== materialPreviewLoadSequence) return;
+    const resolvedMime = resolveMaterialPreviewMime(material, download);
+    state.presentationMime = resolvedMime;
+    if (resolvedMime) {
+      const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
+      state.presentationUrl = URL.createObjectURL(previewBlob);
+    }
+    setToast(state.presentationUrl ? `${material.name} 已投屏` : `${material.name} 已选中；该格式需后端提供页面预览`);
+  } catch (error) {
+    if (loadSequence !== materialPreviewLoadSequence) return;
+    state.presentationName = "";
+    setToast(`材料读取失败：${error.message}`, false);
+  }
   render();
-  startMeetingEvents(meeting.id);
-
-  if (connected) await loadMeetingDetailFromBackend(meeting.id);
 }
 
 async function presentMaterial(materialId) {
@@ -944,26 +1841,13 @@ async function presentMaterial(materialId) {
   if (!material) return;
   state.selectedMaterial = material.id;
   state.stageTab = "presentation";
-  try {
-    await api.openInStage(state.selectedMeetingId, {
-      materialId: material.id,
-      name: material.name,
-      type: material.type,
-      version: material.version,
-      page: state.currentSlide
-    });
-    setApiStatus("connected", "已连接后端");
-    setToast(`${material.name} 已投屏`);
-  } catch {
-    setToast(`${material.name} 已在本地投屏，后端投屏状态接口未接通`);
-  }
-  render();
+  await loadMaterialPreview(material.id);
 }
 
 async function toggleStageFullscreen() {
   const target = document.querySelector(".center-card");
-  if (!target || !document.fullscreenEnabled) {
-    setToast("当前环境不支持全屏展示");
+  if (!target) {
+    setToast("未找到可全屏展示的内容");
     render();
     return;
   }
@@ -972,12 +1856,24 @@ async function toggleStageFullscreen() {
       await document.exitFullscreen();
       setToast("已退出全屏");
       render();
-    } else {
+    } else if (state.stageFullscreen) {
+      state.stageFullscreen = false;
+      document.body.classList.remove("stage-fullscreen-active");
+      setToast("已退出全屏");
+      render();
+    } else if (document.fullscreenEnabled) {
       await target.requestFullscreen();
       state.toast = "已进入全屏";
+    } else {
+      state.stageFullscreen = true;
+      document.body.classList.add("stage-fullscreen-active");
+      setToast("已进入全屏");
+      render();
     }
   } catch (error) {
-    setToast(`全屏失败：${error.message}`);
+    state.stageFullscreen = true;
+    document.body.classList.add("stage-fullscreen-active");
+    setToast("已进入全屏");
     render();
   }
 }
@@ -995,34 +1891,54 @@ function saveKnowledgeRename(id) {
     return;
   }
   doc.name = name;
-  setToast("文档名称已更新", false);
+  setToast("名称仅在当前页面更新；后端暂缺知识库元数据更新接口", false);
   render();
 }
 
-function downloadKnowledgeSource(id) {
+async function downloadKnowledgeSource(id) {
   const doc = getKnowledgeDocById(id);
   if (!doc) return;
-  const snippets = knowledgePreviewSnippets[doc.id] || [];
-  const content = [
-    doc.name,
-    `类型：${doc.type.toUpperCase()}`,
-    "",
-    ...snippets
-  ].join("\n");
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${doc.name.replace(/\.[^.]+$/, "")}-source.txt`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  setToast("源文件内容已下载", false);
+  try {
+    const download = await api.downloadKnowledgeDocument(doc.id);
+    saveApiDownload(download, doc.name);
+    setToast("知识库源文件已开始下载", false);
+  } catch (error) {
+    setToast(`知识库文件下载失败：${error.message}`, false);
+  }
+  render();
+}
+
+async function deleteKnowledgeDocument(id) {
+  const doc = knowledgeDocs.find((item) => item.id === id);
+  if (!doc) return;
+  state.deletingKnowledgeId = doc.id;
+  render();
+  try {
+    const response = await api.deleteKnowledgeDocument(doc.id);
+    if (response?.status !== undefined && Number(response.status) !== 200) {
+      throw new Error(`后端返回状态 ${response.status}`);
+    }
+    if (response?.doc_id && String(response.doc_id) !== String(doc.id)) {
+      throw new Error("后端返回的文档 ID 与删除请求不一致");
+    }
+    const index = knowledgeDocs.findIndex((item) => item.id === doc.id);
+    if (index >= 0) knowledgeDocs.splice(index, 1);
+    state.selectedKnowledge = knowledgeDocs[0]?.id || "";
+    state.knowledgeTotal = Math.max(0, Number(state.knowledgeTotal || 0) - 1);
+    state.pendingDeleteKnowledgeId = "";
+    state.modal = "";
+    recordClientLog("info", "Knowledge document deleted", { doc_id: response?.doc_id || doc.id });
+    setToast("知识文档已从后端删除");
+  } catch (error) {
+    setToast(`知识文档删除失败：${error.message}`, false);
+  } finally {
+    state.deletingKnowledgeId = "";
+  }
   render();
 }
 
 function renderLogin() {
+  const isRegister = state.authMode === "register";
   return `
     <main class="login-page">
       <section class="login-hero">
@@ -1041,31 +1957,28 @@ function renderLogin() {
       <section class="login-card panel">
         <header class="login-card-head">
           <span>测试版</span>
-          <h2>手机号登录</h2>
-          <p>使用手机号、短信验证码和邀请码进入 VPBuddy。</p>
+          <h2>${isRegister ? "注册账号" : "账号登录"}</h2>
+          <p>使用邮箱和密码${isRegister ? "创建 VPBuddy 账号" : "进入 VPBuddy"}。</p>
         </header>
-        <label class="field with-icon">
-          ${icon("user")}
-          <input value="" placeholder="请输入手机号" inputmode="tel" autocomplete="tel" />
-        </label>
-        <div class="login-code-row">
-          <label class="field with-icon">
-            ${icon("lock")}
-            <input value="" placeholder="请输入验证码" inputmode="numeric" autocomplete="one-time-code" />
-          </label>
-          <button class="ghost" data-action="toast" data-message="验证码已发送到手机">发送验证码</button>
+        <div class="login-tabs" aria-label="认证方式">
+          <button class="${isRegister ? "" : "active"}" data-action="auth-mode" data-mode="login">账号登录</button>
+          <button class="${isRegister ? "active" : ""}" data-action="auth-mode" data-mode="register">注册账号</button>
         </div>
         <label class="field with-icon">
-          ${icon("invite")}
-          <input value="" placeholder="请输入邀请码" autocomplete="off" />
+          ${icon("user")}
+          <input data-field="auth-email" type="email" value="${escapeHtml(state.authEmail)}" placeholder="请输入邮箱" autocomplete="email" ${state.authBusy ? "disabled" : ""} />
         </label>
-        <button class="primary wide" data-action="login">进入测试版</button>
-        <p class="login-note">邀请码由 VPBuddy 项目组发放，仅用于当前测试环境。</p>
+        <label class="field with-icon">
+          ${icon("lock")}
+          <input data-field="auth-password" type="password" value="" placeholder="请输入密码（至少 6 位）" autocomplete="${isRegister ? "new-password" : "current-password"}" ${state.authBusy ? "disabled" : ""} />
+        </label>
+        <button class="primary wide" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "请稍候…" : isRegister ? "注册并登录" : "登录"}</button>
+        <p class="login-note" aria-live="polite">${state.authError ? escapeHtml(state.authError) : "账号由 VPBuddy 后端统一认证。"}</p>
       </section>
       <footer class="login-status">
         <span><i class="status-dot"></i>客户端已就绪</span>
-        <span>${icon("mic", 18)}麦克风已连接</span>
-        <span>设备正常 <i class="status-check">${icon("check", 14)}</i></span>
+        <span>${icon("mic", 18)}麦克风将在录制时授权</span>
+        <span>设备状态将在会议中检测</span>
       </footer>
     </main>
   `;
@@ -1083,6 +1996,25 @@ function renderShell(content) {
             </button>
           `).join("")}
         </nav>
+        <div class="account-menu-wrap">
+          ${state.showAccountMenu ? `
+            <div class="account-menu" role="menu" aria-label="个人账号菜单">
+              <button data-action="download-log" role="menuitem">
+                ${icon("download", 20)}
+                <span><strong>下载 Log</strong><small>导出客户端运行诊断</small></span>
+              </button>
+              <button class="danger" data-action="logout" role="menuitem">
+                ${icon("power", 20)}
+                <span><strong>退出登录</strong><small>结束当前账号会话</small></span>
+              </button>
+            </div>
+          ` : ""}
+          <button class="user-card" data-action="toggle-account-menu" title="打开个人账号菜单" aria-expanded="${state.showAccountMenu}">
+            <span class="avatar">${escapeHtml((user.name || "VP").slice(0, 2).toUpperCase())}</span>
+            <span class="user-card-copy"><strong title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</strong><em>个人账号</em></span>
+            <span class="account-chevron ${state.showAccountMenu ? "open" : ""}">${icon("chevronDown", 18)}</span>
+          </button>
+        </div>
       </aside>
       <section class="shell-main">${content}</section>
     </main>
@@ -1096,14 +2028,17 @@ function renderWorkspace() {
         <h1>工作台</h1>
         <p class="api-state ${state.apiStatus}">${state.apiMessage}</p>
       </div>
-      <button class="primary" data-action="open-create">${icon("plus")}新建会议</button>
+      <div class="page-actions">
+        <button class="ghost icon-only" data-action="refresh-meetings" title="刷新会议" aria-label="刷新会议">${icon("refresh")}</button>
+        <button class="primary" data-action="open-create">${icon("plus")}新建会议</button>
+      </div>
     </header>
     <section class="meeting-grid">
       ${meetings.length
         ? meetings.map(renderMeetingCard).join("")
         : renderEmptyState(
             "暂无会议",
-            hasBackendSession() ? "后端当前没有会议数据。点击新建会议可以创建一条真实会议。" : "暂无演示会议数据。",
+            state.apiStatus === "error" ? state.apiMessage : "后端当前没有会议数据。点击新建会议可以创建一条真实会议。",
             "meeting-empty"
           )}
     </section>
@@ -1114,17 +2049,20 @@ function renderWorkspace() {
 
 function renderMeetingCard(meeting) {
   const running = meeting.status === "进行中";
+  const coverStyle = meeting.cover ? `style="background-image:url('${escapeHtml(meeting.cover)}')"` : "";
   return `
     <article class="meeting-card panel">
-      <div class="meeting-cover" style="background-image:url('${meeting.cover}')">
-        <span class="status-chip ${running ? "live" : "done"}"><i></i>${meeting.status}</span>
+      <div class="meeting-cover ${meeting.cover ? "" : "empty-cover"}" ${coverStyle}>
+        ${meeting.cover ? "" : `<span class="meeting-cover-brand">${logo(true)}</span>`}
+        <span class="status-chip ${running ? "live" : "done"}"><i></i>${escapeHtml(meeting.status)}</span>
+        <button class="meeting-delete" data-action="delete-meeting" data-id="${escapeHtml(meeting.id)}" title="删除会议" aria-label="删除会议">${icon("close", 16)}</button>
       </div>
       <div class="meeting-info">
-        <h2>${meeting.title}</h2>
-        <p>${meeting.desc}</p>
+        <h2>${escapeHtml(meeting.title)}</h2>
+        <p>${escapeHtml(meeting.desc)}</p>
         <div class="meeting-actions">
-          <span>${icon("calendar", 18)}${meeting.time}</span>
-          <button class="${running ? "primary compact" : "ghost compact"}" data-action="${running ? "open-meeting" : "open-summary"}" data-id="${meeting.id}">
+          <span>${icon("calendar", 18)}${escapeHtml(meeting.time)}</span>
+          <button class="${running ? "primary compact" : "ghost compact"}" data-action="${running ? "open-meeting" : "open-summary"}" data-id="${escapeHtml(meeting.id)}">
             ${running ? "进入会议" : "查看总结"} ${icon(running ? "arrowRight" : "file", 18)}
           </button>
         </div>
@@ -1144,8 +2082,8 @@ function renderCreateModal() {
           <label>项目/客户（可选）<input data-field="meeting-project" maxlength="50" placeholder="请输入项目或客户名称（可选）" /></label>
         </div>
         <div class="device-box">
-          <div class="device-item">${icon("mic", 34)}<span><strong>麦克风</strong><em>正常</em></span></div>
-          <div class="device-item">${icon("bot", 34)}<span><strong>录音</strong><em>就绪</em></span></div>
+          <div class="device-item">${icon("mic", 34)}<span><strong>麦克风</strong><em>录制时授权</em></span></div>
+          <div class="device-item">${icon("bot", 34)}<span><strong>录音</strong><em>等待开始</em></span></div>
         </div>
         <footer class="modal-actions">
           <button class="light" data-action="close-create">取消</button>
@@ -1156,9 +2094,55 @@ function renderCreateModal() {
   `;
 }
 
+function renderMeetingLoadingColumns() {
+  const rows = Array.from({ length: 5 }, (_, index) => `
+    <span class="loading-row ${index === 4 ? "short" : ""}"></span>
+  `).join("");
+  return `
+    <aside class="meeting-left panel meeting-loading-panel">
+      <div class="loading-tab-row"><span></span><span></span></div>
+      <div class="loading-stack">${rows}</div>
+    </aside>
+    <section class="stage-center">
+      <div class="center-card panel meeting-loading-center">
+        <div class="loading-tab-row"><span></span><span class="short"></span></div>
+        <div class="meeting-loading-message" role="status" aria-live="polite">
+          <i class="meeting-loading-spinner"></i>
+          <strong>正在加载会议内容</strong>
+          <p>正在同步会议记录、材料和交付物</p>
+        </div>
+      </div>
+      <div class="panel meeting-loading-composer">
+        <span class="loading-row short"></span>
+        <span class="loading-row"></span>
+      </div>
+    </section>
+    <aside class="ai-panel panel meeting-loading-panel">
+      <div class="loading-tab-row"><span></span></div>
+      <div class="loading-stack">${rows}</div>
+    </aside>
+  `;
+}
+
 function renderMeetingStage() {
   const meeting = getSelectedMeeting();
   const running = meeting?.status !== "已结束";
+  const recording = state.recordingStatus === "recording";
+  const paused = state.recordingStatus === "paused";
+  const recordingBusy = ["starting", "pausing", "resuming", "stopping"].includes(state.recordingStatus);
+  const recordingLabel = state.recordingStatus === "starting"
+    ? "连接中"
+    : state.recordingStatus === "pausing"
+      ? "暂停中"
+      : state.recordingStatus === "resuming"
+        ? "恢复中"
+    : state.recordingStatus === "stopping"
+      ? "停止中"
+      : recording
+        ? "暂停录制"
+        : paused
+          ? "继续录制"
+        : state.recordingStatus === "error" ? "重试录制" : "开始录制";
   return `
     <main class="stage-screen">
       <header class="stage-topbar">
@@ -1167,27 +2151,41 @@ function renderMeetingStage() {
           <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
         </div>
         <div class="stage-title">
-          <h1>${escapeHtml(meeting?.title || "会议空间")}</h1>
-          <span class="recording"><i></i>${running ? "录制中" : "已结束"}</span>
-          <span class="timer">00:28:34</span>
+          ${state.meetingTitleEditing ? `
+            <label class="stage-title-editor">
+              <input
+                class="stage-title-input"
+                value="${escapeHtml(state.meetingTitleDraft)}"
+                maxlength="50"
+                aria-label="会议名称"
+                ${state.meetingTitleSaving ? "disabled" : ""}
+              />
+              <button class="stage-title-edit-action save" data-action="save-meeting-title" title="保存会议名称" aria-label="保存会议名称" ${state.meetingTitleSaving ? "disabled" : ""}>${icon("check", 17)}</button>
+              <button class="stage-title-edit-action cancel" data-action="cancel-meeting-title" title="取消修改" aria-label="取消修改" ${state.meetingTitleSaving ? "disabled" : ""}>${icon("close", 17)}</button>
+            </label>
+          ` : `<h1 class="stage-meeting-title" data-role="meeting-title" title="双击修改会议名称">${escapeHtml(meeting?.title || "会议空间")}</h1>`}
+          <button class="recording ${recording ? "active" : ""} ${paused ? "paused" : ""} ${state.recordingStatus}" data-action="toggle-recording" title="${escapeHtml(state.recordingMessage)}" ${!running || recordingBusy || state.meetingDetailLoading ? "disabled" : ""}><i></i>${running ? recordingLabel : "已结束"}</button>
+          <span class="timer">${formatRecordingTime(state.recordingElapsed)}</span>
         </div>
         <div class="stage-actions">
-          <button class="danger" data-action="open-summary">${icon("power")}结束会议</button>
+          <button class="danger" data-action="end-meeting" ${state.endingMeeting || state.meetingDetailLoading ? "disabled" : ""}>${icon("power")}${state.endingMeeting ? "结束中" : "结束会议"}</button>
         </div>
       </header>
-      <section class="stage-layout">
-        ${renderMeetingLeftPanel()}
-        <section class="stage-center">
-          <div class="center-card panel">
-            <div class="center-tabs">
-              <button class="${state.stageTab === "presentation" ? "active" : ""}" data-action="stage-tab" data-tab="presentation">投屏内容</button>
-              <button class="${state.stageTab === "deliverable" ? "active" : ""}" data-action="stage-tab" data-tab="deliverable">交付物</button>
+      <section class="stage-layout ${state.meetingDetailLoading ? "meeting-detail-loading" : ""}" ${state.meetingDetailLoading ? 'aria-busy="true"' : ""}>
+        ${state.meetingDetailLoading ? renderMeetingLoadingColumns() : `
+          ${renderMeetingLeftPanel()}
+          <section class="stage-center">
+            <div class="center-card panel ${state.stageFullscreen ? "is-fullscreen" : ""}">
+              <div class="center-tabs">
+                <button class="${state.stageTab === "presentation" ? "active" : ""}" data-action="stage-tab" data-tab="presentation">投屏内容</button>
+                <button class="${state.stageTab === "deliverable" ? "active" : ""}" data-action="stage-tab" data-tab="deliverable">交付物</button>
+              </div>
+              ${state.stageTab === "presentation" ? renderPresentationCanvas() : renderDeliverableCanvas()}
             </div>
-            ${state.stageTab === "presentation" ? renderPresentationCanvas() : renderDeliverableCanvas()}
-          </div>
-          ${renderVpbuddyComposer()}
-        </section>
-        ${renderAIPanel()}
+            ${renderVpbuddyComposer()}
+          </section>
+          ${renderAIPanel()}
+        `}
       </section>
     </main>
   `;
@@ -1196,20 +2194,118 @@ function renderMeetingStage() {
 function renderMeetingLeftPanel() {
   if (state.stageTab === "deliverable") return renderDeliverableListPanel();
 
-  const tab = state.meetingLeftTab;
+  const tab = state.meetingLeftTab === "understanding" && !uiVisibility.meetingUnderstandingTab
+    ? "records"
+    : state.meetingLeftTab;
   return `
     <aside class="meeting-left panel">
       <div class="panel-tabs">
-        <button class="${tab === "materials" ? "active" : ""}" data-action="left-tab" data-tab="materials">会议资料</button>
         <button class="${tab === "records" ? "active" : ""}" data-action="left-tab" data-tab="records">会议记录</button>
-        <button class="${tab === "understanding" ? "active" : ""}" data-action="left-tab" data-tab="understanding">会议理解</button>
+        <button class="${tab === "materials" ? "active" : ""}" data-action="left-tab" data-tab="materials">会议资料</button>
+        ${uiVisibility.meetingUnderstandingTab ? `<button class="${tab === "understanding" ? "active" : ""}" data-action="left-tab" data-tab="understanding">会议理解</button>` : ""}
       </div>
       ${tab === "records" ? renderMeetingRecords() : tab === "understanding" ? renderUnderstanding() : renderMaterialsList()}
     </aside>
   `;
 }
 
+function renderUploadProgress(context) {
+  const progress = state.uploadProgress;
+  if (!progress || progress.context !== context) return "";
+  const percent = progress.total ? Math.round((progress.current / progress.total) * 100) : 0;
+  const isSending = context === "vpbuddy-material";
+  const isKnowledge = context === "knowledge";
+  const isProminent = isSending || isKnowledge;
+  const activeItem = Math.min(progress.total, progress.current + (progress.status === "uploading" ? 1 : 0));
+  const statusText = progress.status === "complete"
+    ? `${progress.name} ${isSending ? "发送完成" : "上传完成"}`
+    : progress.status === "error"
+      ? `${progress.name} ${isSending ? "发送失败" : "上传失败"}`
+      : `${isSending ? "正在发送" : "正在上传"} ${progress.name}`;
+  const progressTitle = progress.status === "complete"
+    ? (isSending ? "材料发送完成" : "知识文档上传完成")
+    : progress.status === "error"
+      ? (isSending ? "材料发送失败" : "知识文档上传失败")
+      : (isSending ? "正在发送材料" : "正在上传知识文档");
+  const progressState = progress.status === "complete"
+    ? "100%"
+    : progress.status === "error"
+      ? "失败"
+      : (isSending ? "发送中" : "上传中");
+  return `
+    <div class="upload-progress ${isKnowledge ? "knowledge-upload-progress" : ""} ${isSending ? "vpbuddy-send-progress" : ""} ${progress.status} ${progress.status === "uploading" ? "indeterminate" : ""}" role="progressbar" aria-live="polite" aria-label="${escapeHtml(statusText)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+      ${isProminent ? `
+        <div class="upload-progress-head">
+          <span class="upload-progress-icon">${icon(progress.status === "complete" ? "check" : progress.status === "error" ? "close" : "upload", 20)}</span>
+          <span class="upload-progress-copy">
+            <strong>${progressTitle}</strong>
+            <em title="${escapeHtml(progress.name)}">${escapeHtml(progress.name)}</em>
+          </span>
+          <b>${progressState}</b>
+        </div>
+      ` : ""}
+      <div class="upload-progress-track"><i style="width:${percent}%"></i></div>
+      ${isProminent ? `
+        <div class="upload-progress-meta">
+          <span>${progress.status === "uploading" ? `${isSending ? "正在发送" : "正在处理"}第 ${activeItem} 个${isSending ? "材料" : "文档"}` : escapeHtml(statusText)}</span>
+          <span>${progress.current}/${progress.total} 已完成</span>
+        </div>
+      ` : `<span>${escapeHtml(statusText)} · ${progress.current}/${progress.total}</span>`}
+    </div>
+  `;
+}
+
+function renderDemoVersionControl() {
+  const selected = getSelectedDemoVersion();
+  if (!selected || !demoVersions.length) return "";
+  return `
+    <label class="deliverable-version-control demo-version-control" data-action="demo-version-control">
+      <span>Demo 版本</span>
+      <select class="demo-version-select" aria-label="切换 Demo 版本">
+        ${demoVersions.map((item) => `
+          <option value="${item.version}" ${item.version === selected.version ? "selected" : ""}>${escapeHtml(item.label)}${item.summary ? ` · ${escapeHtml(item.summary)}` : ""}</option>
+        `).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderDeliverableDownloadMenu(current) {
+  const busy = Boolean(state.downloadBusyMode);
+  const allProgress = state.downloadBusyMode === "all" && state.downloadProgress
+    ? `${state.downloadProgress.current}/${state.downloadProgress.total}`
+    : "";
+  return `
+    <div class="deliverable-download-wrap">
+      <button
+        class="ghost small deliverable-download-trigger"
+        data-action="toggle-deliverable-download-menu"
+        aria-haspopup="menu"
+        aria-expanded="${state.showDeliverableDownloadMenu}"
+        ${busy ? "disabled" : ""}
+      >
+        ${icon("download", 16)}
+        ${state.downloadBusyMode === "all" ? `打包中 ${allProgress}` : state.downloadBusyMode === "single" ? "下载中" : "下载"}
+        ${icon("chevronDown", 14)}
+      </button>
+      ${state.showDeliverableDownloadMenu ? `
+        <div class="deliverable-download-menu" role="menu">
+          <button data-action="download-current-deliverable" data-id="${escapeHtml(current.id)}" role="menuitem">
+            ${icon("file", 18)}
+            <span><strong>下载单个文件</strong><em>${escapeHtml(current.name)}</em></span>
+          </button>
+          <button data-action="download-all-deliverables" role="menuitem">
+            ${icon("download", 18)}
+            <span><strong>下载全部交付物</strong><em>六份文件打包为 ZIP</em></span>
+          </button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
 function renderDeliverableListPanel() {
+  const orderedDeliverables = getOrderedDeliverables();
   return `
     <aside class="meeting-left panel">
       <header class="deliverable-list-head">
@@ -1217,13 +2313,13 @@ function renderDeliverableListPanel() {
         <p>会中持续生成，可切换版本并回到会议证据。</p>
       </header>
       <div class="deliverable-stack">
-        ${deliverables.map((item) => `
-          <button class="deliverable-row ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${item.id}">
+        ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
+          <button class="deliverable-row ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
             ${docBadge(item.type)}
-            <span><strong>${item.name}</strong><em>${item.status} · ${item.time}</em></span>
-            <small>${item.version}</small>
+            <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
+            ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
           </button>
-        `).join("")}
+        `).join("") : renderEmptyState("暂无交付物", "后端尚未生成本次会议的交付物。", "stack-empty")}
       </div>
     </aside>
   `;
@@ -1231,18 +2327,19 @@ function renderDeliverableListPanel() {
 
 function renderMaterialsList() {
   return `
-    <button class="primary wide upload-button" data-action="open-upload" data-context="material">${icon("upload")}上传材料</button>
+    ${uiVisibility.meetingMaterialUploadButton ? `<button class="primary wide upload-button" data-action="open-upload" data-context="material">${icon("upload")}上传材料</button>` : ""}
+    ${renderUploadProgress("material")}
     <div class="material-stack">
       ${materials.length
         ? materials.map((item, index) => `
-          <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${item.id}" title="单击选中，双击投屏">
+          <button class="material-row ${state.selectedMaterial === item.id ? "active" : ""}" data-action="select-material" data-id="${escapeHtml(item.id)}" title="单击选中，双击投屏">
             ${docBadge(item.type)}
-            <span><strong>${item.name}</strong><em>${item.size}</em></span>
+            <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.size)}</em></span>
           </button>
         `).join("")
         : renderEmptyState(
             "暂无本次会议材料",
-            hasBackendSession() ? "后端已连接，但当前会议没有材料记录。上传成功后这里会显示会议级材料。" : "暂无演示材料。",
+            "当前会议没有材料记录。上传成功后这里会显示会议级材料。",
             "stack-empty"
           )}
     </div>
@@ -1250,25 +2347,32 @@ function renderMaterialsList() {
 }
 
 function renderMeetingRecords() {
+  const recordStatusText = state.recordingStatus === "recording"
+    ? "实时转写中"
+    : state.recordingStatus === "paused"
+      ? "录制已暂停"
+    : state.recordingStatus === "starting"
+      ? "正在连接转写"
+      : state.recordingStatus === "error" ? "转写连接异常" : state.recordingStatus === "stopped" ? "录制已结束" : "录音未开始";
   return `
     <section class="record-panel">
       <header class="record-head">
-        <span><i></i>实时转写中</span>
-        <button data-action="toast" data-message="会议记录已同步到最新">${icon("refresh", 16)}同步</button>
+        <span class="${state.recordingStatus}"><i></i>${recordStatusText}</span>
+        <button data-action="refresh-transcript">${icon("refresh", 16)}同步</button>
       </header>
       <div class="record-stream">
         ${meetingRecords.length
           ? meetingRecords.map((item) => `
             <article class="record-item ${item.tone}">
               <div>
-                <header><strong>${item.speaker}</strong><em>${item.role}</em><time>${item.time}</time></header>
-                <p>${item.text}</p>
+                <header><strong>${escapeHtml(item.speaker)}</strong><em>${escapeHtml(item.role)}</em><time>${escapeHtml(item.time)}</time></header>
+                <p>${escapeHtml(item.text)}</p>
               </div>
             </article>
           `).join("")
           : renderEmptyState(
               "暂无转写记录",
-              hasBackendSession() ? "等待后端 ASR 写入说话人、时间和内容分段。" : "暂无演示转写记录。",
+              state.recordingStatus === "recording" ? "正在等待后端 ASR 返回说话人、时间和内容分段。" : "点击顶部“开始录制”后，实时转写会显示在这里。",
               "stack-empty"
             )}
       </div>
@@ -1277,23 +2381,23 @@ function renderMeetingRecords() {
 }
 
 function renderUnderstanding() {
-  if (hasBackendSession() && !meetingRecords.length) {
+  if (!meetingUnderstanding.length) {
     return renderEmptyState(
       "暂无会议理解数据",
-      "后端尚未返回会议记录或理解结果；有转写分段后再展示诉求、待确认和已确认事项。",
+      "后端尚未返回会议需求、目标、风险或待确认事项。",
       "understanding-empty"
     );
   }
 
   const groups = [
-    ["用户核心诉求", "blue", ["碳排放数据统一管理", "多组织多层级统计", "可视化看板与报告"]],
-    ["待确认事项", "yellow", ["数据采集频率", "是否支持多国/欧盟Scope 3", "减排路径模型选型"]],
-    ["已确认事项", "green", ["支持集团/区域/工厂分层", "支持PC端", "核心模块包含碳核算/数据管理/报表分析"]]
-  ];
+    ["需求与目标", "blue", meetingUnderstanding.filter((item) => ["req", "goal", "feat"].includes(item.type))],
+    ["待确认事项", "yellow", meetingUnderstanding.filter((item) => item.type === "que" || item.status === "pending")],
+    ["风险事项", "green", meetingUnderstanding.filter((item) => item.type === "risk")]
+  ].filter(([, , items]) => items.length);
   return groups.map(([title, tone, items]) => `
     <section class="understand-card ${tone}">
       <h3><i></i>${title}</h3>
-      ${items.map((item) => `<p><span>•</span>${item}</p>`).join("")}
+      ${items.map((item) => `<p><span>•</span>${escapeHtml(item.text || "")}</p>`).join("")}
     </section>
   `).join("");
 }
@@ -1325,6 +2429,7 @@ function renderAnnotationLayer() {
 
 function renderPresentationCanvas() {
   const annotations = renderAnnotationLayer();
+  const selectedMaterial = materials.find((item) => item.id === state.selectedMaterial);
   const colors = ["#2f8cff", "#09dba1", "#ffc94c", "#ff4f64"];
   const tools = [
     ["cursor", "指针", "arrowRight"],
@@ -1361,7 +2466,15 @@ function renderPresentationCanvas() {
     </div>
     <div class="slide-frame annotation-canvas tool-${state.activeTool}">
       <div class="stage-zoom-layer" style="--stage-zoom:${state.zoom / 100}">
-        <img src="${assets.slide}" alt="ESG碳管理系统解决方案演示页" />
+        ${state.presentationUrl && state.presentationMime.startsWith("image/")
+          ? `<img src="${state.presentationUrl}" alt="${escapeHtml(state.presentationName || selectedMaterial?.name || "会议材料")}" />`
+          : state.presentationUrl && state.presentationMime.includes("pdf")
+            ? `<iframe class="material-pdf-preview" src="${state.presentationUrl}" title="${escapeHtml(state.presentationName || selectedMaterial?.name || "会议材料")}"></iframe>`
+            : renderEmptyState(
+                state.presentationName || selectedMaterial?.name || "暂无投屏内容",
+                selectedMaterial ? "双击左侧材料以读取原文件；当前格式如无法直接预览，需要后端补充页面转换接口。" : "上传本次会议材料后，可从左侧清单选择并投屏。",
+                "stage-empty"
+              )}
         <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
         <div class="annotation-text-layer">
           ${annotations.textNotes}
@@ -1374,276 +2487,229 @@ function renderPresentationCanvas() {
       </button>
     </div>
     <div class="thumb-strip">
-      <button class="thumb-arrow" data-action="slide-step" data-step="-1">${icon("arrowLeft", 16)}</button>
-      ${assets.thumbs.map((src, index) => `<button class="slide-thumb ${state.currentSlide === index + 1 ? "active" : ""}" data-action="select-slide" data-slide="${index + 1}"><img src="${src}" alt="第 ${index + 1} 页缩略图" /><span>${index + 1}</span></button>`).join("")}
-      <button class="thumb-arrow" data-action="slide-step" data-step="1">${icon("arrowRight", 16)}</button>
+      <span class="thumb-empty">${selectedMaterial ? "后端尚未提供材料页面缩略图" : "选择材料后显示页面导航"}</span>
     </div>
   `;
 }
 
 function renderDeliverableCanvas() {
-  const current = deliverables.find((item) => item.id === state.selectedDeliverable) || deliverables[0];
-  if (current.id !== "del-demo") {
-    return `
-      <div class="deliverable-head">
-        <h2>${current.name}（${current.subtitle}）</h2>
-        <div>
-          <button class="ghost small" data-action="modal" data-modal="deliverable-open">${icon("monitor", 16)}打开</button>
-        </div>
-      </div>
-      <section class="deliverable-doc">
-        <header>
-          ${docBadge(current.type)}
-          <div><h3>${current.name}</h3><p>${current.desc}</p></div>
-          <span>${current.version}</span>
-        </header>
-        <div class="deliverable-evidence">
-          <article><strong>来源会议片段</strong><p>10:10 会议问答、10:16 AI 解释材料、10:20 待办确认。</p></article>
-          <article><strong>关联材料</strong><p>ESG碳管理系统方案.pptx、需求调研清单.docx、系统功能清单.xlsx。</p></article>
-          <article><strong>处理状态</strong><p>${current.status}，等待 VP 确认后进入会后归档。</p></article>
-        </div>
-        <div class="deliverable-preview-list">
-          <p><span>01</span> 业务目标、项目范围与核心约束</p>
-          <p><span>02</span> 数据采集、核算、报表与权限管理</p>
-          <p><span>03</span> 待确认问题、风险项和下一步任务</p>
-        </div>
-      </section>
-    `;
-  }
-
+  const current = getSelectedDeliverable();
+  if (!current) return renderEmptyState("暂无交付物", "后端生成文档后会自动显示在这里。", "deliverable-empty");
+  const deliverableKind = canonicalDeliverableKind(current.kind);
+  const isDemoDeliverable = deliverableKind === "demo";
+  const isTextOnlyDeliverable = ["req", "arch", "tasks", "api", "risk"].includes(deliverableKind);
+  const selectedDemo = isDemoDeliverable ? getSelectedDemoVersion() || demoVersions[0] : null;
+  const bodyContent = String(current.content || "").trim();
+  const headerDescription = [selectedDemo?.summary, current.desc, current.subtitle]
+    .map((value) => String(value || "").trim())
+    .find((value) => value && value !== bodyContent) || "后端生成文档";
+  const displayedVersion = selectedDemo?.label || current.version;
+  const previewFile = selectedDemo?.file || "demo_latest.html";
+  const demoPreviewUrl = isDemoDeliverable && current.status === "已完成"
+    ? `${apiBaseUrl.replace(/\/$/, "")}/docs/${encodeURIComponent(state.selectedMeetingId)}/${encodeURIComponent(previewFile)}?v=${encodeURIComponent(displayedVersion)}`
+    : "";
   return `
     <div class="deliverable-head">
-      <h2>交互 Demo（ESG碳管理系统）</h2>
-      <div><button class="ghost small" data-action="toast" data-message="已进入交付物全屏预览">${icon("monitor", 16)}全屏</button><button class="ghost small" data-action="toast" data-message="交互 Demo 已刷新">${icon("refresh", 16)}刷新</button></div>
+      <h2>${escapeHtml(current.name)}（${escapeHtml(current.subtitle)}）</h2>
+      <div class="deliverable-head-actions">
+        ${demoPreviewUrl ? `<button class="ghost small demo-fullscreen-button" data-action="toggle-fullscreen" title="全屏展示 Demo">${icon("maximize", 16)}全屏展示</button>` : ""}
+        ${isDemoDeliverable ? renderDemoVersionControl() : ""}
+        ${renderDeliverableDownloadMenu(current)}
+      </div>
     </div>
-    <div class="demo-frame">
-      <img src="${assets.dashboard}" alt="ESG碳管理系统交互 Demo 仪表盘" />
-    </div>
+    <section class="deliverable-doc ${demoPreviewUrl ? "demo-deliverable-doc" : ""}">
+      <header class="${isTextOnlyDeliverable ? "text-only-deliverable-header" : ""}">
+        ${isTextOnlyDeliverable ? "" : docBadge(current.type)}
+        <div><h3>${escapeHtml(current.name)}</h3><p>${escapeHtml(headerDescription)}</p></div>
+        ${isDemoDeliverable || isTextOnlyDeliverable ? "" : `<span>${escapeHtml(displayedVersion)}</span>`}
+      </header>
+      ${demoPreviewUrl
+        ? `<iframe
+            class="deliverable-demo-preview"
+            src="${escapeHtml(demoPreviewUrl)}"
+            title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
+            sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+            referrerpolicy="no-referrer"
+          ></iframe>`
+        : current.content
+        ? isTextOnlyDeliverable
+          ? `<article class="deliverable-content markdown-content">${renderMarkdown(current.content)}</article>`
+          : `<pre class="deliverable-content">${escapeHtml(current.content)}</pre>`
+        : renderEmptyState("暂无在线正文预览", canonicalDeliverableKind(current.kind) === "demo" ? "交互 Demo 请下载 HTML 文件查看。" : "文档正文尚未生成或后端列表仅返回元数据。", "deliverable-empty")}
+    </section>
   `;
 }
 
 function renderVpbuddyComposer() {
   const messageCount = state.vpbuddyMessages.length;
+  const materialProgressVisible = state.uploadProgress?.context === "vpbuddy-material";
+  const materialSending = state.uploadProgress?.context === "vpbuddy-material" && state.uploadProgress.status === "uploading";
+  const messageMarkup = state.vpbuddyMessages.map((item) => {
+    const type = ["question", "answer", "material"].includes(item.type) ? item.type : "answer";
+    const sender = type === "answer" ? "VPBuddy" : type === "material" ? "我 · 材料" : "我";
+    const text = type === "answer" ? stripAssistantReasoning(item.text) : String(item.text || "");
+    const renderedText = type === "answer" ? renderMarkdown(text) : escapeHtml(text);
+    const body = type === "answer"
+      ? `<div class="message-body markdown-content">${renderedText}</div>`
+      : `<p class="message-body">${type === "material" ? icon("upload", 15) : ""}<span>${renderedText}</span></p>`;
+    return `
+      <article class="chat-message ${type}">
+        <div class="message-meta"><strong>${sender}</strong><time>${escapeHtml(item.time || "")}</time></div>
+        ${body}
+      </article>
+    `;
+  }).join("");
   return `
-    <section class="send-box center-send-box panel">
+    <section class="send-box center-send-box panel ${state.showComposerHistory ? "is-expanded" : "is-collapsed"} ${materialProgressVisible ? "has-material-progress" : ""}">
       <header>
         <h3>${icon("send")}发送给 VPBuddy</h3>
         <button class="composer-toggle ${state.showComposerHistory ? "open" : ""}" data-action="toggle-composer-history">
           ${state.showComposerHistory ? "收起记录" : `展开记录${messageCount ? ` · ${messageCount}` : ""}`}
         </button>
       </header>
-      ${state.showComposerHistory ? `
-        <div class="composer-history">
-          ${messageCount ? state.vpbuddyMessages.map((item) => `
-            <article class="${item.type}">
-              <time>${item.time}</time>
-              <p>${escapeHtml(item.text)}</p>
-            </article>
-          `).join("") : `<p class="empty-history">暂无发送记录</p>`}
-        </div>
-      ` : ""}
+      <div class="composer-history" aria-label="与 VPBuddy 的对话记录">
+        ${messageCount ? messageMarkup : `<p class="empty-history">暂无发送记录</p>`}
+      </div>
       <div class="composer-row">
         <textarea class="vpbuddy-input" maxlength="500" placeholder="输入你的问题、补充说明或交付要求...">${escapeHtml(state.composerText)}</textarea>
         <div class="composer-actions">
           <span class="composer-count">${state.composerText.length}/500</span>
-          <button class="primary" data-action="send-vpbuddy-message">${icon("send", 16)}发送问题</button>
-          <button class="secondary" data-action="send-vpbuddy-material">${icon("upload", 16)}发送材料</button>
+          <button class="primary" data-action="send-vpbuddy-message" ${state.chatBusy ? "disabled" : ""}>${icon("send", 16)}${state.chatBusy ? "发送中" : "发送问题"}</button>
+          <button class="secondary" data-action="send-vpbuddy-material" ${materialSending ? "disabled" : ""} aria-busy="${materialSending}">${icon("upload", 16)}${materialSending ? "发送中" : "发送材料"}</button>
         </div>
       </div>
+      ${renderUploadProgress("vpbuddy-material")}
     </section>
   `;
 }
 
 function renderAIPanel() {
-  const followups = shouldUseDemoData() ? aiFollowupQuestions : [];
-  const explanations = shouldUseDemoData() ? explanationFindings : [];
+  const followups = aiFollowupQuestions;
+  const explanations = explanationFindings;
   return `
     <aside class="ai-panel panel">
-      <h2>AI 协同</h2>
-      <section class="ai-box">
-        <div class="box-title">${icon("sparkle")}<strong>AI反问</strong><button data-action="toast" data-message="${hasBackendSession() ? "后端暂未提供 AI 反问刷新接口" : "已根据会议记录重新生成反问建议"}">${icon("refresh", 16)}刷新</button></div>
-        <div class="followup-list">
-          ${followups.length
-            ? followups.slice(0, 3).map((item) => `
-              <button class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${item.id}">
-                ${icon("bot", 16)}
-                <span>
-                  <strong>${item.question}</strong>
-                  <em>${item.time} · 面向 ${item.target} · ${item.status}</em>
-                  <i>${item.reason}</i>
-                </span>
-              </button>
-            `).join("")
-            : renderEmptyState(
-                "暂无 AI 反问",
-                hasBackendSession() ? "后端尚未提供反问列表接口，或当前会议还没有生成反问结果。" : "暂无演示反问。",
-                "compact-empty"
-              )}
-        </div>
-        ${followups.length ? `<button class="link-more" data-action="modal" data-modal="all-followups">查看全部 AI 反问 ${icon("arrowRight", 16)}</button>` : ""}
-      </section>
-      <section class="explain-box">
+      <header class="ai-panel-head">
+        <h2>AI 协同</h2>
+        <button data-action="refresh-collab" title="刷新 AI 协同内容">${icon("refresh", 16)}刷新</button>
+      </header>
+      <div class="followup-list">
+        ${followups.length
+          ? followups.map((item) => `
+            <button class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${item.id}">
+              ${icon("bot", 16)}
+              <span>
+                <strong>${escapeHtml(item.question)}</strong>
+                <em>${escapeHtml(item.time)} · 面向 ${escapeHtml(item.target)} · ${escapeHtml(item.status)}</em>
+                <i>${escapeHtml(item.reason)}</i>
+              </span>
+            </button>
+          `).join("")
+          : renderEmptyState(
+              "实时展示Agent协调内容，自主提出会议问题",
+              "会议中的 Agent 协调信息会在这里持续更新。",
+              "compact-empty"
+            )}
+      </div>
+      ${uiVisibility.explanationMaterials ? `<section class="explain-box">
         <div class="box-title">${icon("file")}<strong>解释材料</strong></div>
         <div class="explanation-list">
           ${explanations.length
             ? explanations.map((item) => `
               <button class="explanation-row ${state.selectedExplanation === item.id ? "active" : ""}" data-action="open-explanation" data-id="${item.id}">
-                <time>${item.time}</time>
-                <span class="${item.status.includes("需") ? "pending" : "done"}">${item.status}</span>
-                <strong>${item.title}</strong>
-                <p>${item.summary}</p>
-                <em>${item.lookupTargets.join(" / ")}</em>
+                <time>${escapeHtml(item.time)}</time>
+                <span class="${item.status.includes("需") ? "pending" : "done"}">${escapeHtml(item.status)}</span>
+                <strong>${escapeHtml(item.title)}</strong>
+                <p>${escapeHtml(item.summary)}</p>
+                <em>${escapeHtml(item.lookupTargets.join(" / "))}</em>
               </button>
             `).join("")
             : renderEmptyState(
                 "暂无解释材料",
-                hasBackendSession() ? "后端尚未提供会议概念检索和解释材料接口；当前不展示静态样例。" : "暂无演示解释材料。",
+                "后端尚未提供客户问题到检索证据、解释草稿和提交状态的结构化接口。",
                 "compact-empty"
               )}
         </div>
         ${explanations.length ? `<button class="link-more" data-action="modal" data-modal="all-explanations">查看全部解释材料 ${icon("arrowRight", 16)}</button>` : ""}
-      </section>
+      </section>` : ""}
     </aside>
   `;
 }
 
 function renderTimeline() {
-  if (hasBackendSession()) {
-    return `
-      <section class="timeline panel">
-        <h2>${icon("calendar")}会议时间线</h2>
-        ${renderEmptyState("暂无会议时间线", "后端尚未提供会议事件时间线接口；当前不展示演示时间线。", "timeline-empty")}
-      </section>
-    `;
-  }
-
   return `
     <section class="timeline panel">
       <h2>${icon("calendar")}会议时间线</h2>
-      <div class="timeline-track">
-        ${timeline.map((item) => `
-          <article>
-            <span></span>
-            <time>${item.time}</time>
-            <strong>${item.title}</strong>
-            <p>${item.desc}</p>
-          </article>
-        `).join("")}
-      </div>
+      ${timeline.length ? `<div class="timeline-track">${timeline.map((item) => `
+        <article><span></span><time>${escapeHtml(item.time)}</time><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.desc)}</p></article>
+      `).join("")}</div>` : renderEmptyState("暂无会议时间线", "后端尚未提供会议事件时间线接口。", "timeline-empty")}
     </section>
+  `;
+}
+
+function renderSummaryLoading(meeting) {
+  const loadingRows = Array.from({ length: 4 }, (_, index) => `
+    <span class="loading-row ${index === 3 ? "short" : ""}"></span>
+  `).join("");
+  return `
+    <main class="summary-page" aria-busy="true">
+      <header class="summary-header">
+        <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
+        <h1>${escapeHtml(meeting?.title || "会议总结")}</h1>
+        <span class="ended-chip">${escapeHtml(meeting?.status || "已结束")}</span>
+        <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
+        <div class="summary-loading-actions"><span class="loading-row"></span></div>
+      </header>
+      <section class="panel delivery-strip summary-detail-loading">
+        <article class="panel summary-loading-panel" role="status" aria-live="polite">
+          <div class="summary-loading-status">
+            <i class="meeting-loading-spinner"></i>
+            <strong>正在加载交付物</strong>
+            <span>正在同步 Demo 与会议交付文档</span>
+          </div>
+          ${loadingRows}
+        </article>
+      </section>
+    </main>
   `;
 }
 
 function renderSummary() {
   const meeting = getSelectedMeeting();
-  if (hasBackendSession()) {
-    return `
+  if (state.meetingDetailLoading) return renderSummaryLoading(meeting);
+  const orderedDeliverables = getOrderedDeliverables();
+  const downloadProgress = state.downloadBusyMode === "all" && state.downloadProgress
+    ? `${state.downloadProgress.current}/${state.downloadProgress.total}`
+    : "";
+  return `
       <main class="summary-page">
         <header class="summary-header">
           <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
           <h1>${escapeHtml(meeting?.title || "会议总结")}</h1>
           <span class="ended-chip">${meeting?.status || "已结束"}</span>
           <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
-          <div>
-            <button class="primary" data-action="toast" data-message="后端尚未提供会议纪要导出接口">${icon("download")}导出纪要</button>
-            <button class="secondary" data-action="toast" data-message="后端尚未提供会议总结分享接口">${icon("share")}分享</button>
+          <div class="summary-header-actions">
+            <button class="ghost icon-only" data-action="refresh-deliverables" title="刷新交付物" aria-label="刷新交付物">${icon("refresh")}</button>
+            <button class="primary" data-action="download-all-deliverables" ${state.downloadBusyMode || !orderedDeliverables.length ? "disabled" : ""}>
+              ${icon("download")}${state.downloadBusyMode === "all" ? `打包中 ${downloadProgress}` : "下载"}
+            </button>
           </div>
         </header>
-        <section class="summary-grid">
-          <article class="panel conclusions">
-            <h2>${icon("sparkle")}会议结论</h2>
-            ${renderEmptyState("暂无会议结论", "后端尚未提供会议结论/摘要结构化接口；当前不展示演示结论。", "summary-empty")}
-          </article>
-          <article class="panel minute">
-            <h2>${icon("file")}会议纪要摘要</h2>
-            ${renderEmptyState("暂无纪要摘要", "等待后端返回会议概况、参会人员、议题回顾等结构化纪要。", "summary-empty")}
-          </article>
-          <article class="panel todo-panel">
-            <h2>${icon("check")}待办事项</h2>
-            ${renderEmptyState("暂无待办事项", "后端尚未提供会后待办列表接口。", "summary-empty")}
-          </article>
-          <article class="panel refs-panel">
-            <h2>${icon("book")}引用材料</h2>
-            ${materials.length
-              ? materials.map((item) => `<button data-action="toast" data-message="${item.name} 已加入下载队列">${docBadge(item.type)}<strong>${item.name}</strong><span>${item.size}</span><time>${item.time || ""}</time>${icon("download", 16)}</button>`).join("")
-              : renderEmptyState("暂无引用材料", "当前会议未返回材料引用关系。", "summary-empty")}
-          </article>
-        </section>
         <section class="panel delivery-strip">
           <h2>${icon("grid")}交付物</h2>
           <div>
-            ${deliverables.length
-              ? deliverables.map((item) => `
-                <article data-action="toast" data-message="${item.name} 已切换版本">
+            ${orderedDeliverables.length
+              ? orderedDeliverables.map((item) => `
+                <article class="${state.downloadBusyId === item.id ? "busy" : ""}" data-action="download-deliverable" data-id="${escapeHtml(item.id)}">
                   ${docBadge(item.type)}
-                  <strong>${item.name}</strong>
-                  <p>${item.desc || item.subtitle || "后端返回的会议交付物。"}</p>
-                  <label>版本：<select><option>${item.version || "V1.0"}</option></select></label>
+                  <strong>${escapeHtml(item.name)}${state.downloadBusyId === item.id ? " · 下载中" : ""}</strong>
+                  <p>${escapeHtml(item.desc || item.subtitle || "后端返回的会议交付物。")}</p>
+                  ${canonicalDeliverableKind(item.kind) === "demo" ? renderDemoVersionControl() : ""}
                 </article>
               `).join("")
               : renderEmptyState("暂无交付物", "后端尚未返回本会议交付物列表。", "summary-empty")}
           </div>
         </section>
       </main>
-    `;
-  }
-
-  return `
-    <main class="summary-page">
-      <header class="summary-header">
-        <button class="ghost back" data-action="nav" data-view="workspace">${icon("arrowLeft")}返回工作台</button>
-        <h1>${escapeHtml(meeting?.title || "会议总结")}</h1>
-        <span class="ended-chip">${meeting?.status || "已结束"}</span>
-        <p>${escapeHtml(meeting?.time || "会议已结束")}</p>
-        <div>
-          <button class="primary" data-action="modal" data-modal="export-summary">${icon("download")}导出纪要</button>
-          <button class="secondary" data-action="modal" data-modal="share-summary">${icon("share")}分享</button>
-        </div>
-      </header>
-      <section class="summary-grid">
-        <article class="panel conclusions">
-          <h2>${icon("sparkle")}会议结论</h2>
-          ${[
-            ["01", "明确项目目标与范围", "本次会议明确了ESG碳管理系统的建设目标、核心功能模块及一期交付范围，聚焦碳数据管理、碳排放核算与可视化。"],
-            ["02", "确定数据来源与集成方案", "确定企业内部数据系统对接清单及对接优先级，采用API对接与定时同步方案，保障数据准确性与时效性。"],
-            ["03", "碳排放核算方法与标准", "采用ISO 14064-1:2018及企业自有核算方法，系统内置行业通用因子库，支持自定义因子扩展。"],
-            ["04", "项目计划与下一步行动", "确认项目实施计划与里程碑，需求评审后进入详细设计阶段，双方明确下一步任务与负责人。"]
-          ].map(([no, title, text]) => `<section><span>${no}</span><div><h3>${title}</h3><p>${text}</p></div></section>`).join("")}
-        </article>
-        <article class="panel minute">
-          <h2>${icon("file")}会议纪要摘要</h2>
-          <h3>会议概况</h3>
-          <p>会议时间：${escapeHtml(meeting?.time || "会议已结束")}</p>
-          <p>会议时长：1小时30分钟</p>
-          <p>会议地点：线上会议（VPBuddy）</p>
-          <h3>参会人员</h3>
-          <p>甲方：张伟、李明、王芳等；乙方：刘洋、陈晨、周航等。</p>
-          <h3>议题回顾</h3>
-          <p>ESG碳管理系统建设目标与范围、核心功能需求与业务流程、数据对接与核算方法、项目计划与下一步工作安排。</p>
-        </article>
-        <article class="panel todo-panel">
-          <h2>${icon("check")}待办事项</h2>
-          ${todoItems.map(([text, owner, date]) => `<label><span class="empty-check"></span><strong>${text}</strong><em>${icon("user", 15)}${owner}</em><time>${date}</time></label>`).join("")}
-        </article>
-        <article class="panel refs-panel">
-          <h2>${icon("book")}引用材料</h2>
-          ${materials.slice(1).map((item) => `<button data-action="toast" data-message="${item.name} 已加入下载队列">${docBadge(item.type)}<strong>${item.name}</strong><span>${item.size}</span><time>2024-05-08</time>${icon("download", 16)}</button>`).join("")}
-        </article>
-      </section>
-      <section class="panel delivery-strip">
-        <h2>${icon("grid")}交付物</h2>
-        <div>
-          ${materials.map((item) => `
-            <article data-action="toast" data-message="${item.name} 已切换版本">
-              ${docBadge(item.type)}
-              <strong>${item.name}</strong>
-              <p>${item.type === "ppt" ? "系统整体解决方案与架构设计，包含功能模块与实施路径。" : "系统对接、需求说明与项目实施相关交付材料。"}</p>
-              <label>版本：<select><option>${item.version}</option></select></label>
-            </article>
-          `).join("")}
-        </div>
-      </section>
-    </main>
   `;
 }
 
@@ -1657,36 +2723,41 @@ function renderKnowledge() {
       <h1>知识库</h1>
       <p>共 ${totalText} 个文档</p>
     </header>
-    <section class="knowledge-layout">
+    <section class="knowledge-layout ${uiVisibility.knowledgeDetailPanel ? "" : "list-only"}">
       <div class="knowledge-main">
         <div class="kb-toolbar">
           <label class="field search-field"><input class="knowledge-search-input" value="${escapeHtml(state.knowledgeSearch)}" placeholder="搜索文档名称或关键词" />${icon("search")}</label>
           <button class="primary" data-action="open-upload" data-context="knowledge">${icon("upload")}上传文档</button>
         </div>
+        ${renderUploadProgress("knowledge")}
         <div class="kb-table panel">
-          <div class="kb-row kb-head"><span>名称</span><span>类型</span><span>更新时间</span><span>状态</span></div>
+          <div class="kb-row kb-head"><span>名称</span><span>类型</span><span>更新时间</span><span>状态</span><span>操作</span></div>
           ${visibleDocs.length ? visibleDocs.map((doc) => {
             const docCallable = isKnowledgeCallable(doc);
-            return `<button class="kb-row ${doc.id === selected?.id ? "active" : ""}" data-action="knowledge-select" data-id="${doc.id}">
-              <span>${docBadge(doc.type)}${doc.name}</span><span>${doc.type.toUpperCase()}</span><span>${doc.updated}</span><span><i class="status-dot ${docCallable ? "on" : "off"}"></i>${docCallable ? "本次会议可调用" : "可用未调用"}</span>
-            </button>`;
+            const deleting = state.deletingKnowledgeId === doc.id;
+            return `<div class="kb-document-row ${doc.id === selected?.id ? "active" : ""} ${deleting ? "deleting" : ""}">
+              <button class="kb-row-main" data-action="knowledge-select" data-id="${escapeHtml(doc.id)}">
+                <span>${docBadge(doc.type)}${escapeHtml(doc.name)}</span><span>${escapeHtml(doc.type.toUpperCase())}</span><span>${escapeHtml(doc.updated)}</span><span><i class="status-dot ${docCallable ? "on" : "off"}"></i>${docCallable ? "可供会议检索" : "当前未启用"}</span>
+              </button>
+              <button class="kb-delete-button" data-action="delete-knowledge" data-id="${escapeHtml(doc.id)}" title="删除 ${escapeHtml(doc.name)}" aria-label="删除 ${escapeHtml(doc.name)}" ${deleting ? "disabled" : ""}>${icon("trash", 17)}</button>
+            </div>`;
           }).join("") : `<div class="kb-empty">${state.knowledgeMessage || "没有匹配的知识文档"}</div>`}
           <footer>共 ${visibleDocs.length} 条 <button data-action="toast" data-message="已经是第一页">‹</button><button data-action="toast" data-message="当前第 1 页">1</button><button data-action="toast" data-message="没有更多页">›</button></footer>
         </div>
       </div>
-      ${selected ? `<aside class="knowledge-detail panel">
-        <header>${docBadge(selected.type)}<div><h2>${selected.name}</h2><p>${selected.type.toUpperCase()} · ${selected.size}</p></div></header>
-        <h3>本次会议可调用</h3>
-        <p>开启后，AI 在本次会议中可引用该文档内容。</p>
+      ${uiVisibility.knowledgeDetailPanel ? (selected ? `<aside class="knowledge-detail panel">
+        <header>${docBadge(selected.type)}<div><h2>${escapeHtml(selected.name)}</h2><p>${escapeHtml(selected.type.toUpperCase())} · ${escapeHtml(selected.size)}</p></div></header>
+        <h3>会议中可调用</h3>
+        <p>个人知识库属于当前账号，可在所有会议中被检索引用。</p>
         <div class="knowledge-callable">
           <button class="switch ${callable ? "on" : "off"}" data-action="toggle-knowledge-callable" data-id="${selected.id}" aria-pressed="${callable}"><i></i></button>
-          <span>${callable ? "已开启，AI 可在本次会议引用" : "未开启，AI 不会在本次会议引用"}</span>
+          <span>${callable ? "已开启，AI 可在会议中引用" : "当前页面已关闭调用"}</span>
         </div>
         <footer>
           <button class="ghost" data-action="modal" data-modal="knowledge-preview" data-id="${selected.id}">${icon("monitor")}预览</button>
           <button class="primary" data-action="modal" data-modal="knowledge-more" data-id="${selected.id}">更多操作</button>
         </footer>
-      </aside>` : `<aside class="knowledge-detail panel empty-detail"><h2>${hasBackendSession() ? "知识库明细未返回" : "未选择文档"}</h2><p>${hasBackendSession() ? "当前后端只返回知识库总数，没有返回文档列表明细；等待后端补充后可展示文档详情。" : "调整搜索关键词或切换知识库范围后查看详情。"}</p></aside>`}
+      </aside>` : `<aside class="knowledge-detail panel empty-detail"><h2>未选择文档</h2><p>${escapeHtml(state.knowledgeMessage || "上传个人知识文档或调整搜索关键词后查看详情。")}</p></aside>`) : ""}
     </section>
   `;
   return renderShell(body);
@@ -1714,7 +2785,7 @@ function renderSettings() {
     </section>
     <section class="settings-card panel">
       <header>${icon("sparkle", 34)}<div><h2>AI 配置</h2><p>配置 AI 模型与接口，驱动智能问答与内容生成</p></div></header>
-      <label>API Key <strong>*</strong><textarea class="settings-api-key" placeholder="请输入您的 API Key">${escapeHtml(state.settings.apiKey)}</textarea></label>
+      <label>API Key <strong>*</strong><textarea class="settings-api-key" placeholder="${state.settings.apiKeyConfigured ? "后端已有凭证；修改配置时请重新输入" : "请输入您的 API Key"}">${escapeHtml(state.settings.apiKey)}</textarea></label>
       <label>AI 模型 <strong>*</strong><select class="settings-model">
         ${modelPresets.map((item) => `<option value="${item.id}" ${state.settings.modelPreset === item.id ? "selected" : ""}>${item.label}</option>`).join("")}
       </select></label>
@@ -1747,27 +2818,36 @@ function renderActionModal() {
   const selectedKnowledge = getSelectedKnowledgeDoc() || knowledgeDocs[0];
   const selectedKnowledgeCallable = isKnowledgeCallable(selectedKnowledge);
 
-  if (state.modal === "all-followups") {
+  if (state.modal === "delete-meeting") {
+    const meeting = meetings.find((item) => item.id === state.pendingDeleteMeetingId);
     return `
       <div class="modal-backdrop action-backdrop">
-        <section class="action-modal panel list-modal">
+        <section class="action-modal panel">
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
-          <header>
-            <h2>全部 AI 反问</h2>
-            <p>基于实时会议记录生成的追问建议。</p>
-          </header>
-          <div class="modal-list">
-            ${aiFollowupQuestions.map((item) => `
-              <button class="question-row followup-row" data-action="open-followup" data-id="${item.id}">
-                ${icon("bot", 16)}
-                <span>
-                  <strong>${item.question}</strong>
-                  <em>${item.time} · 面向 ${item.target} · ${item.status}</em>
-                  <i>${item.reason}</i>
-                </span>
-              </button>
-            `).join("")}
-          </div>
+          <h2>删除会议</h2>
+          <p>确定删除“${escapeHtml(meeting?.title || "该会议")}”及其后端会议数据吗？此操作不可撤销。</p>
+          <footer>
+            <button class="ghost" data-action="close-modal">取消</button>
+            <button class="danger" data-action="confirm-delete-meeting">确认删除</button>
+          </footer>
+        </section>
+      </div>
+    `;
+  }
+
+  if (state.modal === "delete-knowledge") {
+    const doc = knowledgeDocs.find((item) => item.id === state.pendingDeleteKnowledgeId);
+    const deleting = state.deletingKnowledgeId === state.pendingDeleteKnowledgeId;
+    return `
+      <div class="modal-backdrop action-backdrop">
+        <section class="action-modal panel">
+          <button class="modal-close" data-action="close-modal" ${deleting ? "disabled" : ""}>${icon("close")}</button>
+          <h2>删除知识文档</h2>
+          <p>确定从个人知识库删除“${escapeHtml(doc?.name || "该文档")}”吗？此操作不可撤销。</p>
+          <footer>
+            <button class="ghost" data-action="close-modal" ${deleting ? "disabled" : ""}>取消</button>
+            <button class="danger" data-action="confirm-delete-knowledge" ${deleting ? "disabled" : ""}>${deleting ? "删除中…" : "确认删除"}</button>
+          </footer>
         </section>
       </div>
     `;
@@ -1779,22 +2859,22 @@ function renderActionModal() {
         <section class="action-modal panel followup-detail-modal">
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
           <header>
-            <span>${selectedFollowup.time}</span>
+            <span>${escapeHtml(selectedFollowup.time)}</span>
             <h2>AI 反问详情</h2>
-            <em>${selectedFollowup.status}</em>
+            <em>${escapeHtml(selectedFollowup.status)}</em>
           </header>
           <article class="detail-question">
             <strong>建议反问</strong>
-            <p>${selectedFollowup.question}</p>
+            <p>${escapeHtml(selectedFollowup.question)}</p>
           </article>
           <div class="lookup-meta">
-            <em>面向 ${selectedFollowup.target}</em>
+            <em>面向 ${escapeHtml(selectedFollowup.target)}</em>
             <em>会议对话分析</em>
             <em>待主持人确认</em>
           </div>
           <article class="explain-summary">
             <strong>生成原因</strong>
-            <p>${selectedFollowup.reason}</p>
+            <p>${escapeHtml(selectedFollowup.reason)}</p>
           </article>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
@@ -1815,12 +2895,12 @@ function renderActionModal() {
           </header>
           <div class="modal-list">
             ${explanationFindings.map((item) => `
-              <button class="explanation-row" data-action="open-explanation" data-id="${item.id}">
-                <time>${item.time}</time>
-                <span class="${item.status.includes("需") ? "pending" : "done"}">${item.status}</span>
-                <strong>${item.title}</strong>
-                <p>${item.summary}</p>
-                <em>${item.lookupTargets.join(" / ")}</em>
+              <button class="explanation-row" data-action="open-explanation" data-id="${escapeHtml(item.id)}">
+                <time>${escapeHtml(item.time)}</time>
+                <span class="${item.status.includes("需") ? "pending" : "done"}">${escapeHtml(item.status)}</span>
+                <strong>${escapeHtml(item.title)}</strong>
+                <p>${escapeHtml(item.summary)}</p>
+                <em>${escapeHtml(item.lookupTargets.join(" / "))}</em>
               </button>
             `).join("")}
           </div>
@@ -1835,28 +2915,28 @@ function renderActionModal() {
         <section class="action-modal panel explanation-detail-modal">
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
           <header>
-            <span>${selectedExplanation.time}</span>
-            <h2>${selectedExplanation.title}</h2>
-            <em class="${selectedExplanation.status.includes("需") ? "pending" : "done"}">${selectedExplanation.status}</em>
+            <span>${escapeHtml(selectedExplanation.time)}</span>
+            <h2>${escapeHtml(selectedExplanation.title)}</h2>
+            <em class="${selectedExplanation.status.includes("需") ? "pending" : "done"}">${escapeHtml(selectedExplanation.status)}</em>
           </header>
-          <p class="question-context"><strong>触发原话</strong>${selectedExplanation.trigger}</p>
+          <p class="question-context"><strong>触发原话</strong>${escapeHtml(selectedExplanation.trigger)}</p>
           <div class="lookup-meta">
-            ${selectedExplanation.lookupTargets.map((target) => `<em>${target}</em>`).join("")}
+            ${selectedExplanation.lookupTargets.map((target) => `<em>${escapeHtml(target)}</em>`).join("")}
           </div>
           <div class="concept-list">
-            ${selectedExplanation.keywords.map((keyword) => `<button data-action="concept-search" data-concept="${keyword}">${keyword}</button>`).join("")}
+            ${selectedExplanation.keywords.map((keyword) => `<button data-action="concept-search" data-concept="${escapeHtml(keyword)}">${escapeHtml(keyword)}</button>`).join("")}
           </div>
           <article class="explain-summary">
             <strong>解释建议</strong>
-            <p>${selectedExplanation.explanation}</p>
+            <p>${escapeHtml(selectedExplanation.explanation)}</p>
           </article>
           <div class="evidence-list">
             ${selectedExplanation.evidence.map((source, index) => `
               <article class="evidence-row">
                 <span>${String(index + 1).padStart(2, "0")}</span>
-                <strong>${source.title}</strong>
-                <em>${source.source} · ${source.confidence}</em>
-                <small>${source.ref}</small>
+                <strong>${escapeHtml(source.title)}</strong>
+                <em>${escapeHtml(source.source)} · ${escapeHtml(source.confidence)}</em>
+                <small>${escapeHtml(source.ref)}</small>
               </article>
             `).join("")}
           </div>
@@ -1869,7 +2949,7 @@ function renderActionModal() {
   }
 
   if (state.modal === "knowledge-preview") {
-    const snippets = knowledgePreviewSnippets[selectedKnowledge.id] || [];
+    const snippets = selectedKnowledge.preview ? [selectedKnowledge.preview] : knowledgePreviewSnippets[selectedKnowledge.id] || [];
     return `
       <div class="modal-backdrop action-backdrop">
         <section class="action-modal panel knowledge-preview-modal">
@@ -1877,27 +2957,27 @@ function renderActionModal() {
           <header>
             ${docBadge(selectedKnowledge.type)}
             <div>
-              <span>${selectedKnowledge.updated}</span>
+              <span>${escapeHtml(selectedKnowledge.updated)}</span>
               <h2>知识预览</h2>
-              <p>${selectedKnowledge.name}</p>
+              <p>${escapeHtml(selectedKnowledge.name)}</p>
             </div>
           </header>
           <div class="knowledge-preview-meta">
             <em>${selectedKnowledge.type.toUpperCase()}</em>
-            <em>${selectedKnowledge.size}</em>
+            <em>${escapeHtml(selectedKnowledge.size)}</em>
             <em>${selectedKnowledgeCallable ? "本次会议可调用" : "本次会议不可调用"}</em>
           </div>
           <div class="preview-snippets">
             ${snippets.map((text, index) => `
               <article>
                 <span>${String(index + 1).padStart(2, "0")}</span>
-                <p>${text}</p>
+                <p>${escapeHtml(text)}</p>
               </article>
             `).join("")}
           </div>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
-            <button class="primary" data-action="toggle-knowledge-callable" data-id="${selectedKnowledge.id}">
+            <button class="primary" data-action="toggle-knowledge-callable" data-id="${escapeHtml(selectedKnowledge.id)}">
               ${selectedKnowledgeCallable ? "关闭本次调用" : "开启本次调用"}
             </button>
           </footer>
@@ -1913,19 +2993,23 @@ function renderActionModal() {
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
           <header>
             <h2>更多操作</h2>
-            <p>${selectedKnowledge.name}</p>
+            <p>${escapeHtml(selectedKnowledge.name)}</p>
           </header>
           <div class="knowledge-op-list">
             <section>
               <div>${icon("file", 18)}<span><strong>重命名</strong><em>调整知识文档名称</em></span></div>
               <div class="knowledge-op-control">
                 <input class="knowledge-rename-input" value="${escapeHtml(selectedKnowledge.name)}" />
-                <button class="primary compact" data-action="knowledge-rename-save" data-id="${selectedKnowledge.id}">保存</button>
+                <button class="primary compact" data-action="knowledge-rename-save" data-id="${escapeHtml(selectedKnowledge.id)}">保存</button>
               </div>
             </section>
             <section>
-              <div>${icon("download", 18)}<span><strong>下载源文件</strong><em>${selectedKnowledge.type.toUpperCase()} · ${selectedKnowledge.size}</em></span></div>
-              <button class="ghost compact" data-action="knowledge-download" data-id="${selectedKnowledge.id}">下载</button>
+              <div>${icon("download", 18)}<span><strong>下载源文件</strong><em>${escapeHtml(selectedKnowledge.type.toUpperCase())} · ${escapeHtml(selectedKnowledge.size)}</em></span></div>
+              <button class="ghost compact" data-action="knowledge-download" data-id="${escapeHtml(selectedKnowledge.id)}">下载</button>
+            </section>
+            <section>
+              <div>${icon("close", 18)}<span><strong>删除文档</strong><em>从当前账号的个人知识库移除</em></span></div>
+              <button class="danger compact" data-action="delete-knowledge" data-id="${escapeHtml(selectedKnowledge.id)}">删除</button>
             </section>
           </div>
           <footer>
@@ -1937,21 +3021,19 @@ function renderActionModal() {
   }
 
   const map = {
-    "profile": ["当前账号", `${user.name} · ${user.organization} · ${user.role}。后端可扩展 GET /auth/me 返回组织、角色和权限范围。`],
-    "upload-material": ["上传会议材料", "选择 PPT、PDF、Word、Excel 或图片后，调用 POST /meetings/:id/materials 上传，并进入解析队列。"],
-    "storage": ["会议空间", "展示本组织空间用量、材料解析状态和清理策略。接口建议 GET /workspace/storage。"],
+    "profile": ["当前账号", `${user.name}。后端 GET /api/auth/me 当前仅返回用户 ID、邮箱和创建时间。`],
+    "upload-material": ["上传会议材料", "选择 PPT、PDF、Word、Excel 或图片后，调用 POST /api/meetings/:id/materials 上传。"],
+    "storage": ["会议空间", "后端暂未提供账号存储用量与清理策略接口。"],
     "fullscreen": ["会议室全屏展示", "进入全屏展示时隐藏复杂控制区，仅保留翻页、批注和临时呼出 AI 的浮动工具。"],
     "deliverable-open": ["打开交付物", `${selectedDeliverable.name} 会在会议交互空间中打开，并把本次打开事件写入会议时间线。`],
     "concept-search": ["索引依据", `基于会议原话“${selectedExplanation.trigger}”检索：${selectedExplanation.keywords.join("、")}。当前索引来源包括：${selectedExplanation.lookupTargets.join("、")}。`],
     "ai-more": ["更多 AI 反问", "这里展示 AI 根据会议转写、材料上下文和客户诉求生成的反问队列，支持按对象、状态和触发片段筛选。"],
     "send-material": ["发送材料", "将当前解释材料或交付物提交到会议空间，供后续交付物归档。"],
-    "export-summary": ["导出纪要", "支持导出 DOCX/PDF，并附带会议结论、待办、引用材料和交付物版本。"],
-    "share-summary": ["分享归档", "生成只读分享链接，可设置有效期、访问密码和可下载范围。"],
-    "upload-knowledge": ["上传知识文档", "上传后调用 POST /knowledge/documents，后端解析、切片、向量化并返回可用状态。"],
+    "upload-knowledge": ["上传知识文档", "上传后调用 POST /api/kb/upload，后端解析、切片、向量化并返回可用状态。"],
     "knowledge-preview": ["知识预览", "预览当前文档的解析文本、切片和可被本次会议调用的状态。"],
     "knowledge-more": ["知识更多操作", "包含重命名和源文件下载。"]
   };
-  const [title, body] = map[state.modal] || ["操作", "该操作已接入前端反馈，后续可替换为真实接口调用。"];
+  const [title, body] = map[state.modal] || ["操作", "当前后端未提供该功能接口，本次未执行任何数据操作。"];
   return `
     <div class="modal-backdrop action-backdrop">
       <section class="action-modal panel">
@@ -2052,34 +3134,10 @@ function removeAnnotation(id) {
   state.annotations = state.annotations.filter((item) => item.id !== id);
 }
 
-function getMaterialTypeFromFileName(name) {
-  const ext = name.split(".").pop()?.toLowerCase() || "";
-  if (["ppt", "pptx"].includes(ext)) return "ppt";
-  if (ext === "pdf") return "pdf";
-  if (["doc", "docx"].includes(ext)) return "word";
-  if (["xls", "xlsx"].includes(ext)) return "excel";
-  if (["png", "jpg", "jpeg", "webp"].includes(ext)) return "image";
-  return "demo";
-}
-
 function formatFileSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-}
-
-function addMeetingMaterialFromFile(file, options = {}) {
-  const item = {
-    id: `mat-upload-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: file.name,
-    type: getMaterialTypeFromFileName(file.name),
-    size: formatFileSize(file.size),
-    time: nowTime(),
-    version: "V1.0"
-  };
-  materials.unshift(item);
-  if (options.select) state.selectedMaterial = item.id;
-  return item;
 }
 
 function drawStageAnnotations(ctx, width, height) {
@@ -2165,44 +3223,129 @@ async function captureStageScreenshot() {
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const file = new File([blob], `投屏截图-${stamp}.png`, { type: "image/png" });
-  const material = addMeetingMaterialFromFile(file, { select: true });
-  state.meetingLeftTab = "materials";
+  const progress = { context: "material", current: 0, total: 1, name: file.name, status: "uploading" };
+  state.uploadProgress = progress;
+  render();
   try {
-    await api.sendChatAttachment(state.selectedMeetingId, file, "投屏截屏，请识别图片内容并作为会议材料参考。");
-    setApiStatus("connected", "已连接后端");
-    setToast(`截屏已发送给后端：${material.name}，并加入会议材料列表`);
-  } catch {
-    setToast(`截屏已加入会议材料：${material.name}，后端连接后可同步`);
+    const uploaded = await api.uploadMaterial(state.selectedMeetingId, file);
+    progress.current = 1;
+    progress.status = "complete";
+
+    try {
+      const payload = await api.listMaterials(state.selectedMeetingId);
+      replaceArray(materials, normalizeMaterialsResponse(payload));
+    } catch (refreshError) {
+      const uploadedMaterial = normalizeMaterial(uploaded, materials.length);
+      if (!materials.some((item) => item.id === uploadedMaterial.id)) materials.push(uploadedMaterial);
+      recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: refreshError.message });
+    }
+
+    const uploadedId = uploaded?.id || uploaded?.material_id || "";
+    state.selectedMaterial = materials.some((item) => item.id === uploadedId)
+      ? uploadedId
+      : materials.at(-1)?.id || materials[0]?.id || "";
+    setToast(`截屏已上传为会议材料：${file.name}`);
+  } catch (error) {
+    progress.status = "error";
+    setToast(`截屏上传失败：${error.message}`, false);
   }
   render();
+  window.setTimeout(() => {
+    if (state.uploadProgress === progress) {
+      state.uploadProgress = null;
+      render();
+    }
+  }, 1800);
 }
 
 document.addEventListener("click", async (event) => {
+  const clickedMaterialRow = event.target.closest(".material-row[data-id]");
+  if (state.view === "meeting" && state.selectedMaterial && !clickedMaterialRow) {
+    state.selectedMaterial = "";
+    document.querySelectorAll(".material-row.active").forEach((row) => row.classList.remove("active"));
+  }
   const target = event.target.closest("[data-action]");
-  if (!target) return;
+  if (!target) {
+    let shouldRender = false;
+    if (state.showAccountMenu && !event.target.closest(".account-menu-wrap")) {
+      state.showAccountMenu = false;
+      shouldRender = true;
+    }
+    if (state.showDeliverableDownloadMenu && !event.target.closest(".deliverable-download-wrap")) {
+      state.showDeliverableDownloadMenu = false;
+      shouldRender = true;
+    }
+    if (shouldRender) render();
+    return;
+  }
   const action = target.dataset.action;
+
+  if (action === "demo-version-control") return;
+
+  if (action === "toggle-deliverable-download-menu") {
+    state.showDeliverableDownloadMenu = !state.showDeliverableDownloadMenu;
+    state.showAccountMenu = false;
+    render();
+    return;
+  }
+  state.showDeliverableDownloadMenu = false;
 
   if (action !== "tool" && action !== "annotation-hit") commitTextDraft();
 
-  if (action === "login") {
-    state.view = "workspace";
+  if (action === "toggle-account-menu") {
+    state.showAccountMenu = !state.showAccountMenu;
     render();
-    await loadMeetingsFromBackend();
+    return;
+  }
+  if (action === "download-log") {
+    downloadClientLog();
+    return;
+  }
+  state.showAccountMenu = false;
+
+  if (action === "auth-mode") {
+    state.authEmail = document.querySelector("[data-field='auth-email']")?.value.trim() || state.authEmail;
+    state.authMode = target.dataset.mode === "register" ? "register" : "login";
+    state.authError = "";
+    render();
+    return;
+  }
+  if (action === "auth-submit") {
+    await submitAuthentication();
+    return;
+  }
+  if (action === "logout") {
+    if (window.confirm("确定退出当前 VPBuddy 账号吗？")) {
+      resetRecordingState();
+      resetAuthenticatedSession();
+    }
     return;
   }
   if (action === "nav") {
     state.view = target.dataset.view;
-    if (state.view !== "meeting") closeMeetingEvents();
+    if (state.view !== "meeting") {
+      resetMeetingTitleEditState();
+      meetingDetailLoadSequence += 1;
+      state.meetingDetailLoading = false;
+      closeMeetingEvents();
+      state.stageFullscreen = false;
+      document.body.classList.remove("stage-fullscreen-active");
+    }
     render();
     if (state.view === "knowledge") await loadKnowledgeFromBackend();
+    if (state.view === "settings") await loadAISettings();
     return;
   }
   if (action === "modal") {
     if (target.dataset.id) state.selectedKnowledge = target.dataset.id;
     state.modal = target.dataset.modal;
   }
-  if (action === "close-modal") state.modal = "";
-  if (action === "confirm-modal") setToast("操作已确认，等待后端接口接入");
+  if (action === "close-modal") {
+    state.modal = "";
+    state.pendingDeleteMeetingId = "";
+    state.pendingDeleteKnowledgeId = "";
+  }
+  if (action === "confirm-modal") setToast("当前后端未提供该功能接口，本次未执行数据操作");
   if (action === "toast") setToast(target.dataset.message || "操作已触发");
   if (action === "clear-toast") state.toast = "";
   if (action === "open-create") state.showCreate = true;
@@ -2211,20 +3354,93 @@ document.addEventListener("click", async (event) => {
     await startNewMeetingFromForm();
     return;
   }
+  if (action === "refresh-meetings") {
+    await loadMeetingsFromBackend();
+    return;
+  }
+  if (action === "delete-meeting") {
+    state.pendingDeleteMeetingId = target.dataset.id;
+    state.modal = "delete-meeting";
+    render();
+    return;
+  }
+  if (action === "confirm-delete-meeting") {
+    const meetingId = state.pendingDeleteMeetingId;
+    state.modal = "";
+    state.pendingDeleteMeetingId = "";
+    await deleteMeetingById(meetingId);
+    return;
+  }
+  if (action === "delete-knowledge") {
+    state.pendingDeleteKnowledgeId = target.dataset.id;
+    state.modal = "delete-knowledge";
+    render();
+    return;
+  }
+  if (action === "confirm-delete-knowledge") {
+    const docId = state.pendingDeleteKnowledgeId;
+    await deleteKnowledgeDocument(docId);
+    return;
+  }
   if (action === "open-meeting") {
-    state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
+    resetMeetingTitleEditState();
+    const nextMeetingId = target.dataset.id || state.selectedMeetingId;
+    const preserveActiveRecording = nextMeetingId === state.selectedMeetingId
+      && Boolean(realtimeAsrSession)
+      && ["starting", "recording", "paused", "pausing", "resuming"].includes(state.recordingStatus);
+    state.selectedMeetingId = nextMeetingId;
+    if (!preserveActiveRecording) resetRecordingState();
+    state.stageTab = "presentation";
+    state.stageFullscreen = false;
+    document.body.classList.remove("stage-fullscreen-active");
+    state.meetingLeftTab = "records";
     state.view = "meeting";
+    state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
     render();
     startMeetingEvents(state.selectedMeetingId);
     await loadMeetingDetailFromBackend(state.selectedMeetingId);
     return;
   }
   if (action === "open-summary") {
+    resetMeetingTitleEditState();
     state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
     state.view = "summary";
+    state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
     closeMeetingEvents();
+    render();
+    await loadMeetingDetailFromBackend(state.selectedMeetingId);
+    return;
   }
-  if (action === "stage-tab") state.stageTab = target.dataset.tab;
+  if (action === "toggle-recording") {
+    if (state.recordingStatus === "recording") {
+      try {
+        await pauseRealtimeRecording();
+      } catch (error) {
+        setToast(`暂停录制失败：${error.message}`, false);
+      }
+    } else if (state.recordingStatus === "paused") {
+      await resumeRealtimeRecording();
+    } else {
+      await startRealtimeRecording();
+    }
+    return;
+  }
+  if (action === "end-meeting") {
+    await endCurrentMeeting();
+    return;
+  }
+  if (action === "save-meeting-title") {
+    await saveMeetingTitle();
+    return;
+  }
+  if (action === "cancel-meeting-title") {
+    cancelMeetingTitleEdit();
+    return;
+  }
+  if (action === "stage-tab") {
+    state.stageTab = target.dataset.tab;
+    if (state.stageTab === "deliverable") state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+  }
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
   if (action === "knowledge-select") state.selectedKnowledge = target.dataset.id;
   if (action === "toggle-knowledge-callable") {
@@ -2232,19 +3448,25 @@ document.addEventListener("click", async (event) => {
     state.selectedKnowledge = doc.id;
     const next = !isKnowledgeCallable(doc);
     state.knowledgeCallable[doc.id] = next;
-    setToast(next ? "已开启本次会议可调用" : "已关闭本次会议可调用", false);
+    setToast(`${next ? "已开启" : "已关闭"}当前页面调用状态；后端暂缺知识库元数据更新接口`, false);
   }
   if (action === "knowledge-rename-save") {
     saveKnowledgeRename(target.dataset.id);
     return;
   }
   if (action === "knowledge-download") {
-    downloadKnowledgeSource(target.dataset.id);
+    await downloadKnowledgeSource(target.dataset.id);
     return;
   }
   if (action === "open-upload") {
     state.fileUploadContext = target.dataset.context || "material";
-    document.querySelector(".native-file-input")?.click();
+    const input = document.querySelector(".native-file-input");
+    if (input) {
+      input.accept = state.fileUploadContext === "knowledge"
+        ? ".txt,.md,.pdf"
+        : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg";
+      input.click();
+    }
     return;
   }
   if (action === "capture-screenshot") {
@@ -2255,17 +3477,59 @@ document.addEventListener("click", async (event) => {
     state.selectedMaterial = target.dataset.id;
     setToast("材料已选中，双击可投屏");
   }
+  if (action === "download-material") {
+    const material = materials.find((item) => item.id === target.dataset.id);
+    if (material) {
+      try {
+        saveApiDownload(await api.downloadMaterial(material.id), material.name);
+        setToast(`${material.name} 已开始下载`);
+      } catch (error) {
+        setToast(`材料下载失败：${error.message}`, false);
+      }
+      render();
+    }
+    return;
+  }
   if (action === "select-deliverable") state.selectedDeliverable = target.dataset.id;
+  if (action === "download-current-deliverable") {
+    await downloadCurrentDeliverable(target.dataset.id);
+    return;
+  }
+  if (action === "download-all-deliverables") {
+    await downloadAllDeliverables();
+    return;
+  }
+  if (action === "download-deliverable") {
+    await downloadCurrentDeliverable(target.dataset.id);
+    return;
+  }
   if (action === "select-followup") state.selectedFollowup = target.dataset.id;
   if (action === "toggle-composer-history") state.showComposerHistory = !state.showComposerHistory;
   if (action === "send-vpbuddy-message") {
     const text = state.composerText.trim();
-    await sendVpbuddyChatMessage(text || "请根据当前会议内容继续分析并给出建议。");
+    await sendVpbuddyChatMessage(text);
     return;
   }
   if (action === "send-vpbuddy-material") {
     state.fileUploadContext = "vpbuddy-material";
-    document.querySelector(".native-file-input")?.click();
+    const input = document.querySelector(".native-file-input");
+    if (input) {
+      input.accept = ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp";
+      input.click();
+    }
+    return;
+  }
+  if (action === "refresh-collab") {
+    await refreshMeetingCollab(state.selectedMeetingId);
+    return;
+  }
+  if (action === "refresh-transcript") {
+    await refreshTranscript(state.selectedMeetingId);
+    return;
+  }
+  if (action === "refresh-deliverables") {
+    await refreshDeliverables(state.selectedMeetingId);
+    setToast("交付物状态已刷新");
     return;
   }
   if (action === "open-followup") {
@@ -2305,8 +3569,8 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-slide") state.currentSlide = Number(target.dataset.slide);
   if (action === "slide-step") {
-    const next = state.currentSlide + Number(target.dataset.step);
-    state.currentSlide = Math.max(1, Math.min(assets.thumbs.length, next));
+    state.currentSlide = 1;
+    setToast("后端尚未提供材料页面缩略图与翻页接口", false);
   }
   if (action === "concept-search") {
     state.modal = "concept-search";
@@ -2329,6 +3593,12 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("dblclick", async (event) => {
+  const meetingTitle = event.target.closest(".stage-meeting-title[data-role='meeting-title']");
+  if (meetingTitle) {
+    event.preventDefault();
+    beginMeetingTitleEdit();
+    return;
+  }
   const row = event.target.closest(".material-row[data-id]");
   if (!row) return;
   event.preventDefault();
@@ -2336,11 +3606,13 @@ document.addEventListener("dblclick", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.matches(".stage-title-input")) {
+    state.meetingTitleDraft = event.target.value;
+    return;
+  }
   if (event.target.matches(".knowledge-search-input")) {
     state.knowledgeSearch = event.target.value;
-    const firstDoc = getKnowledgeDocsForCurrentTab()[0];
-    state.selectedKnowledge = firstDoc?.id || "";
-    render();
+    scheduleKnowledgeSearch();
     return;
   }
   if (event.target.matches(".settings-api-key, .settings-endpoint")) {
@@ -2362,6 +3634,15 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.matches(".demo-version-select")) {
+    const version = Number(event.target.value);
+    if (demoVersions.some((item) => item.version === version)) {
+      state.selectedDemoVersion = version;
+      state.demoVersionPinned = true;
+    }
+    render();
+    return;
+  }
   if (event.target.matches(".settings-model")) {
     updateSettingsFromInputs();
     applyModelPreset(event.target.value);
@@ -2372,41 +3653,142 @@ document.addEventListener("change", async (event) => {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
   const names = files.map((file) => file.name).join("、");
-  if (state.fileUploadContext === "vpbuddy-material") {
-    pushVpbuddyMessage(`发送材料：${names}`, "material");
-    const results = await Promise.allSettled(
-      files.map(async (file) => {
-        try {
-          return await api.uploadMaterial(state.selectedMeetingId, file);
-        } catch (error) {
-          return api.sendChatAttachment(
-            state.selectedMeetingId,
-            file,
-            `发送材料给 VPBuddy：${file.name}。请结合当前会议记录和材料内容分析。`
-          );
-        }
-      })
-    );
-    const succeeded = results.some((item) => item.status === "fulfilled");
-    setApiStatus(succeeded ? "connected" : "mock", succeeded ? "已连接后端" : "后端未连接或材料格式暂不支持");
-    setToast(succeeded ? `材料已发送给 VPBuddy：${names}` : `材料已加入本地记录：${names}，后端可用后再同步`);
-  } else if (state.fileUploadContext === "knowledge") {
-    const results = await Promise.allSettled(files.map((file) => api.uploadKnowledgeDocument(file, { meetingId: state.selectedMeetingId })));
-    const succeeded = results.some((item) => item.status === "fulfilled");
-    setApiStatus(succeeded ? "connected" : "mock", succeeded ? "已连接后端" : "后端未连接，知识文档保留在本地选择记录");
-    setToast(succeeded ? `知识文档已上传：${names}` : `已选择知识文档：${names}，后端连接后可上传`);
-  } else {
-    const uploaded = files.map((file) => addMeetingMaterialFromFile(file, { select: true }));
-    const results = await Promise.allSettled(files.map((file) => api.uploadMaterial(state.selectedMeetingId, file)));
-    const succeeded = results.some((item) => item.status === "fulfilled");
-    setApiStatus(succeeded ? "connected" : state.apiStatus, succeeded ? "已连接后端" : state.apiMessage);
-    setToast(succeeded ? `会议材料已上传：${uploaded.map((item) => item.name).join("、")}，等待后端解析` : `会议材料已加入本地列表：${uploaded.map((item) => item.name).join("、")}`);
+  const context = state.fileUploadContext;
+  const progressContext = context;
+  if (!state.selectedMeetingId) {
+    setToast(context === "knowledge"
+      ? "当前后端的个人知识库上传仍要求 meeting_id，请先创建或选择一场会议"
+      : "请先创建或选择一场会议", false);
+    event.target.value = "";
+    render();
+    return;
   }
+
+  const progress = { context: progressContext, current: 0, total: files.length, name: files[0].name, status: "uploading" };
+  state.uploadProgress = progress;
+  let succeeded = 0;
+  const errors = [];
+  const uploadedMaterials = [];
+  render();
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    progress.name = file.name;
+    render();
+    try {
+      if (context === "vpbuddy-material") {
+        const uploaded = await api.uploadMaterial(state.selectedMeetingId, file);
+        const uploadedMaterial = normalizeMaterial(uploaded, materials.length);
+        const existingIndex = materials.findIndex((item) => item.id === uploadedMaterial.id);
+        if (existingIndex >= 0) materials.splice(existingIndex, 1, uploadedMaterial);
+        else materials.unshift(uploadedMaterial);
+        uploadedMaterials.push(uploadedMaterial);
+        state.selectedMaterial = uploadedMaterial.id;
+        state.meetingLeftTab = "materials";
+        state.showComposerHistory = true;
+      } else if (context === "knowledge") {
+        await api.uploadKnowledgeDocument(file, {
+          meetingId: state.selectedMeetingId,
+          scope: "personal_kb",
+          meetingCallable: true
+        });
+      } else {
+        await api.uploadMaterial(state.selectedMeetingId, file);
+      }
+      succeeded += 1;
+    } catch (error) {
+      errors.push(`${file.name}：${error.message}`);
+    }
+    progress.current = index + 1;
+    progress.status = errors.length ? "error" : "uploading";
+    render();
+  }
+
+  progress.status = errors.length ? "error" : "complete";
+  if (context === "knowledge" && succeeded) await loadKnowledgeFromBackend();
+  if (context === "vpbuddy-material" && succeeded) {
+    const [materialList, chatHistory] = await Promise.allSettled([
+      api.listMaterials(state.selectedMeetingId),
+      api.listChatHistory(state.selectedMeetingId)
+    ]);
+    if (materialList.status === "fulfilled") {
+      const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
+      for (const uploadedMaterial of uploadedMaterials) {
+        if (!refreshedMaterials.some((item) => item.id === uploadedMaterial.id)) refreshedMaterials.unshift(uploadedMaterial);
+      }
+      replaceArray(materials, refreshedMaterials);
+    } else {
+      recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: materialList.reason?.message || "unknown" });
+    }
+
+    if (chatHistory.status === "fulfilled") {
+      applyChatHistory(chatHistory.value);
+    } else {
+      for (const uploadedMaterial of uploadedMaterials) {
+        addVpbuddyMessage({
+          time: nowTime(),
+          text: `[上传了材料: ${uploadedMaterial.name}]`,
+          type: "material",
+          source: "material-upload",
+          materialId: uploadedMaterial.id
+        });
+      }
+      recordClientLog("warn", "材料已上传，但 VPBuddy 对话记录刷新失败", { message: chatHistory.reason?.message || "unknown" });
+    }
+    state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
+    state.meetingLeftTab = "materials";
+    state.showComposerHistory = true;
+  }
+  if (context === "material" && succeeded) {
+    try {
+      const payload = await api.listMaterials(state.selectedMeetingId);
+      replaceArray(materials, normalizeMaterialsResponse(payload));
+      state.selectedMaterial = materials.at(-1)?.id || materials[0]?.id || "";
+    } catch {
+      // The successful upload remains on the backend and can be reloaded later.
+    }
+  }
+  setToast(errors.length
+    ? `${succeeded}/${files.length} 个文件${context === "vpbuddy-material" ? "发送" : "上传"}成功；${errors[0]}`
+    : `${names} ${context === "vpbuddy-material" ? "发送" : "上传"}成功`, false);
   event.target.value = "";
   render();
+  window.setTimeout(() => {
+    if (state.uploadProgress === progress) {
+      state.uploadProgress = null;
+      render();
+    }
+  }, 1800);
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.target.matches(".stage-title-input")) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveMeetingTitle();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelMeetingTitleEdit();
+    }
+    return;
+  }
+  if (event.key === "Escape" && state.showAccountMenu) {
+    state.showAccountMenu = false;
+    render();
+    return;
+  }
+  if (event.key === "Escape" && state.stageFullscreen) {
+    state.stageFullscreen = false;
+    document.body.classList.remove("stage-fullscreen-active");
+    setToast("已退出全屏");
+    render();
+    return;
+  }
+  if (event.target.matches("[data-field='auth-email'], [data-field='auth-password']") && event.key === "Enter") {
+    event.preventDefault();
+    void submitAuthentication();
+    return;
+  }
   if (!event.target.matches(".annotation-text-input")) return;
   if (event.key === "Enter") {
     event.preventDefault();
@@ -2500,3 +3882,4 @@ document.addEventListener("pointerup", () => {
 window.addEventListener("resize", updateAnnotationViewport);
 
 render();
+void restoreAuthenticatedSession();
