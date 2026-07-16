@@ -155,7 +155,7 @@ test("single-click material selection avoids a full render while double-click st
 // These frontend guards only prevent an in-session UI regression. They do not
 // replace backend persistence of transcript_segments, which is required to
 // restore meeting records after refresh, reconnect, process restart, or login.
-test("refreshTranscript preserves existing records on an empty snapshot and accepts non-empty authority", () => {
+test("refreshTranscript reconciles backend snapshots without erasing newer realtime records", () => {
   const refreshSource = namedFunction("refreshTranscript");
   assert.match(refreshSource, /if\s*\(meetingId\s*!==\s*state\.selectedMeetingId\)\s*return/, "a transcript refresh must stay scoped to its meeting");
   const normalized = /const\s+([A-Za-z_$][\w$]*)\s*=\s*normalizeTranscriptResponse\(payload\)\s*;/.exec(refreshSource);
@@ -163,27 +163,28 @@ test("refreshTranscript preserves existing records on an empty snapshot and acce
   const recordsName = escapeRegExp(normalized[1]);
   assert.match(
     refreshSource,
-    new RegExp(`if\\s*\\([^)]*${recordsName}\\.length[^)]*\\)[\\s\\S]{0,220}?replaceArray\\(meetingRecords,\\s*${recordsName}\\)`),
-    "an empty snapshot must not erase existing same-meeting records; a non-empty snapshot remains authoritative"
+    new RegExp(`applyTranscriptSnapshot\\(\\s*${recordsName}\\s*,\\s*meetingId\\s*\\)`),
+    "refreshTranscript must reconcile the snapshot with records already received in this page"
   );
   assert.doesNotMatch(
     refreshSource,
-    new RegExp(`replaceArray\\(meetingRecords,\\s*normalizeTranscriptResponse\\(payload\\)\\)`),
-    "refreshTranscript must not apply an uninspected possibly-empty snapshot"
+    /replaceArray\(meetingRecords/,
+    "refreshTranscript must not directly replace current records with a possibly stale snapshot"
   );
 });
 
-test("meeting detail loading cannot replace same-meeting records with an empty backend snapshot", () => {
+test("meeting detail loading reconciles both transcript snapshots", () => {
   const loadDetail = namedFunction("loadMeetingDetailFromBackend");
   assert.match(loadDetail, /const\s+hasCachedDetail\s*=\s*state\.loadedMeetingDetailId\s*===\s*meetingId/, "detail loading must distinguish a new meeting from a same-meeting refresh");
+  assert.match(loadDetail, /if\s*\(!hasCachedDetail\)\s*\{[\s\S]{0,120}?restoreTranscriptRecords\(meetingId\)/, "switching back to a meeting must restore its same-page records before backend requests settle");
 
   const normalized = /const\s+([A-Za-z_$][\w$]*)\s*=\s*normalizeTranscriptResponse\(transcript\.value\)\s*;/.exec(loadDetail);
   assert.ok(normalized, "detail loading must name the transcript endpoint snapshot before applying it");
   const recordsName = escapeRegExp(normalized[1]);
   assert.match(
     loadDetail,
-    new RegExp(`if\\s*\\([^)]*${recordsName}\\.length[^)]*\\)[\\s\\S]{0,220}?replaceArray\\(meetingRecords,\\s*${recordsName}\\)`),
-    "same-meeting records must survive an empty transcript endpoint response while non-empty responses replace them"
+    new RegExp(`applyTranscriptSnapshot\\(\\s*${recordsName}\\s*,\\s*meetingId\\s*\\)`),
+    "the transcript endpoint snapshot must pass through reconciliation"
   );
 
   const postAwaitSource = loadDetail.slice(loadDetail.indexOf("await Promise.allSettled"));
@@ -192,6 +193,39 @@ test("meeting detail loading cannot replace same-meeting records with an empty b
     /replaceArray\(meetingRecords,\s*\[\s*\]\s*\)/,
     "a failed or empty post-await transcript request must not erase already visible same-meeting records"
   );
+  assert.doesNotMatch(postAwaitSource, /replaceArray\(meetingRecords,\s*(?:detailTranscripts|nextRecords)\)/, "detail snapshots must never bypass reconciliation");
+});
+
+test("meeting re-entry cache persists locally with account and meeting isolation", () => {
+  assert.match(mainSource, /createTranscriptRecordStore\(\{[\s\S]{0,120}?storage:\s*window\.localStorage/, "transcript records need durable local storage");
+  const authUserSource = namedFunction("applyAuthenticatedUser");
+  assert.match(authUserSource, /transcriptRecordStore\.setOwner\(email\s*\|\|\s*profile\.user_id/, "local transcript storage must be scoped to the authenticated user");
+  const resetSource = namedFunction("resetAuthenticatedSession");
+  assert.match(resetSource, /transcriptRecordStore\.setOwner\(""\)/, "logout must detach the active account without deleting its durable transcript cache");
+  const deleteSource = namedFunction("deleteMeetingById");
+  assert.match(deleteSource, /transcriptRecordStore\.remove\(meetingId\)/, "deleting a meeting must delete its local transcript copy");
+  const normalizeSource = namedFunction("normalizeTranscriptResponse");
+  assert.doesNotMatch(normalizeSource, /payload\?*\.cleaned_text|payload\[\s*["']cleaned_text["']\s*\]/, "aggregate cleaned_text must not be presented as fake transcript segments");
+});
+
+test("realtime callbacks stay pinned to the recording meeting, including a late final segment", () => {
+  const startSource = namedFunction("startRealtimeRecording");
+  assert.match(startSource, /onTranscript:\s*\(message\)\s*=>\s*\{[\s\S]{0,180}?appendRealtimeTranscript\(message,\s*meetingId\)/, "late WS transcript callbacks must be archived under the recording meeting id");
+  assert.match(startSource, /getAuthToken\(\)\s*!==\s*recordingAuthToken/, "late WS transcript callbacks from a previous login must be ignored");
+  for (const callback of ["onStatus", "onComplete", "onError"]) {
+    assert.match(startSource, new RegExp(`${callback}:[\\s\\S]{0,100}?meetingId\\s*!==\\s*state\\.selectedMeetingId`), `${callback} must be scoped to the recording meeting`);
+  }
+  assert.match(startSource, /onComplete:[\s\S]{0,260}?recordingStatus\s*!==\s*"stopping"[\s\S]{0,180}?realtimeAsrSession\s*=\s*null[\s\S]{0,120}?recordingStatus\s*=\s*"stopped"/, "a server-initiated completion must release the finished session without racing explicit stop");
+
+  const clickSource = sourceBetween(mainSource, 'document.addEventListener("click"', 'document.addEventListener("dblclick"');
+  const openMeetingSource = sourceBetween(clickSource, 'if (action === "open-meeting")', 'if (action === "open-summary")');
+  const openSummarySource = sourceBetween(clickSource, 'if (action === "open-summary")', 'if (action === "toggle-recording")');
+  assert.match(openMeetingSource, /preventActiveRecordingMeetingSwitch\(nextMeetingId\)/, "active recording must block a meeting switch before selection changes");
+  assert.match(openSummarySource, /preventActiveRecordingMeetingSwitch\(nextMeetingId\)/, "summary navigation must not retarget an active recording");
+
+  const appendSource = namedFunction("appendRealtimeTranscript");
+  assert.match(appendSource, /meetingId\s*===\s*state\.selectedMeetingId[\s\S]{0,120}?transcriptRecordStore\.read\(meetingId\)/, "a late segment must use the original meeting cache instead of the visible meeting list");
+  assert.match(appendSource, /cacheTranscriptRecords\(meetingId,\s*targetRecords,\s*\{\s*persist:\s*Boolean\(message\.is_sentence_end\)\s*\}\)/, "only final realtime segments should synchronously persist while interim text stays in memory");
 });
 
 test("stopping realtime recording performs one persisted transcript refresh", () => {

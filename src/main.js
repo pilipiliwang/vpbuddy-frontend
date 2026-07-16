@@ -1,6 +1,7 @@
 import { createVpbuddyApi } from "./api/client.js";
 import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
 import { renderMarkdown } from "./utils/markdown.js";
+import { createTranscriptRecordStore, reconcileTranscriptRecords } from "./utils/transcript.js";
 import { createZipBlob } from "./utils/zip.js";
 
 const app = document.querySelector("#app");
@@ -71,7 +72,6 @@ const state = {
   recordingStartedAt: 0,
   recordingElapsed: 0,
   recordingMessage: "尚未开始录制",
-  liveTranscriptId: "",
   endingMeeting: false,
   pendingDeleteMeetingId: "",
   pendingDeleteKnowledgeId: "",
@@ -107,6 +107,8 @@ let knowledgeSearchTimer = 0;
 let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
 let meetingMaterialsRevision = 0;
+let vpbuddyChatRequestSequence = 0;
+const pendingVpbuddyChatRequests = new Map();
 
 const user = {
   name: "VPBuddy 用户",
@@ -119,6 +121,14 @@ const materials = [];
 const timeline = [];
 const meetingRecords = [];
 const meetingUnderstanding = [];
+const transcriptRecordStore = createTranscriptRecordStore({
+  storage: window.localStorage,
+  onStorageError: ({ operation, error }) => recordClientLog("warn", "Local transcript storage failed", {
+    operation,
+    message: error?.message || "unknown"
+  })
+});
+const liveTranscriptIdsByMeeting = new Map();
 
 const aiFollowupQuestions = [];
 const deliverables = [];
@@ -499,6 +509,32 @@ function pushVpbuddyMessage(text, type = "question") {
   state.showComposerHistory = true;
 }
 
+function isVpbuddyChatBusy(meetingId = state.selectedMeetingId) {
+  return Boolean(meetingId && pendingVpbuddyChatRequests.has(meetingId));
+}
+
+function updateVpbuddyMessage(messageId, patch) {
+  const message = state.vpbuddyMessages.find((item) => item.id === messageId);
+  if (!message) return null;
+  Object.assign(message, patch);
+  return message;
+}
+
+function removeVpbuddyMessage(messageId) {
+  const index = state.vpbuddyMessages.findIndex((item) => item.id === messageId);
+  if (index < 0) return false;
+  state.vpbuddyMessages.splice(index, 1);
+  return true;
+}
+
+function restorePendingVpbuddyMessage(meetingId) {
+  const request = pendingVpbuddyChatRequests.get(meetingId);
+  if (!request?.message) return false;
+  addVpbuddyMessage(request.message);
+  state.showComposerHistory = true;
+  return true;
+}
+
 function getVpbuddyMessageKey(message) {
   if (message?.type === "material" && message?.materialId) return `material:${message.materialId}`;
   if (message?.id) return `id:${message.id}`;
@@ -546,6 +582,27 @@ function upsertMeeting(meeting) {
 
 function replaceArray(target, next) {
   target.splice(0, target.length, ...next);
+}
+
+function restoreTranscriptRecords(meetingId) {
+  replaceArray(meetingRecords, transcriptRecordStore.read(meetingId));
+}
+
+function cacheTranscriptRecords(meetingId, records = meetingRecords, options) {
+  if (!meetingId) return;
+  transcriptRecordStore.write(meetingId, records, options);
+}
+
+function applyTranscriptSnapshot(nextRecords, meetingId = state.selectedMeetingId) {
+  if (!meetingId) return false;
+  const currentRecords = meetingId === state.selectedMeetingId
+    ? meetingRecords
+    : transcriptRecordStore.read(meetingId);
+  const reconciled = reconcileTranscriptRecords(currentRecords, nextRecords);
+  cacheTranscriptRecords(meetingId, reconciled);
+  if (meetingId !== state.selectedMeetingId || reconciled === meetingRecords) return false;
+  replaceArray(meetingRecords, reconciled);
+  return true;
 }
 
 function getSelectedMeeting() {
@@ -802,10 +859,27 @@ function normalizeDemoVersion(raw) {
   if (!Number.isFinite(version)) return null;
   const fallbackFile = `demo_v${version}.html`;
   const file = String(raw?.file || fallbackFile).trim().split(/[\\/]/).pop() || fallbackFile;
+  const versionText = Number.isInteger(version) ? String(version) : String(version).replace(/0+$/, "").replace(/\.$/, "");
+  const label = `V${versionText}`;
+  const explicitName = [
+    raw?.version_name,
+    raw?.versionName,
+    raw?.display_name,
+    raw?.displayName,
+    raw?.name,
+    raw?.title
+  ].map((value) => String(value || "").replace(/\s+/g, " ").trim()).find(Boolean) || "";
+  const rawLabel = String(raw?.label || "").replace(/\s+/g, " ").trim();
+  const summary = String(raw?.summary || "").replace(/\s+/g, " ").trim();
+  const backendName = explicitName || (rawLabel && rawLabel.toUpperCase() !== label.toUpperCase() ? rawLabel : "") || summary;
+  const displayLabel = backendName
+    ? (/^v(?:ersion\s*)?\d/i.test(backendName) ? backendName : `${label} · ${backendName}`)
+    : label;
   return {
     version,
-    label: `V${Number.isInteger(version) ? version : String(version).replace(/0+$/, "").replace(/\.$/, "")}`,
-    summary: raw?.summary || `Demo 版本 ${version}`,
+    label,
+    displayLabel,
+    summary: summary || backendName || `Demo 版本 ${version}`,
     createdAt: raw?.created_at || raw?.createdAt || "",
     fileSize: Number(raw?.file_size || raw?.fileSize || 0),
     file
@@ -861,7 +935,8 @@ function getDemoPreviewState(deliverable = deliverables.find((item) => canonical
 
 function stripAssistantReasoning(value) {
   return String(value || "")
-    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "")
+    .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
     .replace(/<\/?think\b[^>]*>/gi, "")
     .trim();
 }
@@ -871,10 +946,7 @@ function normalizeCollabQuestions(payload) {
   return pending.map((item, index) => ({
     id: item.qid || `collab-${index + 1}`,
     time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
-    target: stripAssistantReasoning(item.asked_by || "会议参与者"),
-    question: stripAssistantReasoning(item.question || item.content || ""),
-    reason: stripAssistantReasoning(item.reason || (item.section ? `关联交付物：${item.section}` : "来自后端协同问答")),
-    status: item.status || "待回答"
+    question: stripAssistantReasoning(item.question)
   })).filter((item) => item.question);
 }
 
@@ -890,7 +962,8 @@ function normalizeChatMessage(message) {
     text: type === "answer" ? stripAssistantReasoning(rawText) : rawText,
     type,
     source: messageSource,
-    materialId
+    materialId,
+    status: source.status || "sent"
   };
 }
 
@@ -902,7 +975,8 @@ function normalizeChatHistoryResponse(payload) {
 function applyChatHistory(payload) {
   const messages = normalizeChatHistoryResponse(payload);
   const pendingMaterialMessages = state.vpbuddyMessages.filter((message) => message.type === "material" && message.materialId);
-  const mergedMessages = dedupeVpbuddyMessages([...messages, ...pendingMaterialMessages]);
+  const localChatMessages = state.vpbuddyMessages.filter((message) => message.localOnly && ["sending", "failed"].includes(message.status));
+  const mergedMessages = dedupeVpbuddyMessages([...messages, ...pendingMaterialMessages, ...localChatMessages]);
   replaceArray(state.vpbuddyMessages, mergedMessages);
   state.showComposerHistory = mergedMessages.length > 0;
   return mergedMessages;
@@ -923,6 +997,7 @@ function applyAuthenticatedUser(profile = {}) {
   const email = profile.email || state.authEmail;
   state.authEmail = email;
   user.name = email || "VPBuddy 用户";
+  transcriptRecordStore.setOwner(email || profile.user_id || profile.userId || profile.id || "");
   if (profile.organization) user.organization = profile.organization;
   if (profile.role) user.role = profile.role;
 }
@@ -936,7 +1011,9 @@ function resetAuthenticatedSession(message = "") {
   for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, todoItems]) {
     replaceArray(collection, []);
   }
+  transcriptRecordStore.setOwner("");
   replaceArray(state.vpbuddyMessages, []);
+  pendingVpbuddyChatRequests.clear();
   state.selectedMeetingId = "";
   state.selectedMaterial = "";
   state.selectedDeliverable = "";
@@ -1058,7 +1135,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   const hasCachedDetail = state.loadedMeetingDetailId === meetingId;
   state.meetingDetailLoading = !hasCachedDetail;
   if (!hasCachedDetail) {
-    replaceArray(meetingRecords, []);
+    restoreTranscriptRecords(meetingId);
     replaceArray(materials, []);
     replaceArray(deliverables, []);
     replaceArray(demoVersions, []);
@@ -1066,6 +1143,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
     replaceArray(aiFollowupQuestions, []);
     replaceArray(explanationFindings, []);
     replaceArray(state.vpbuddyMessages, []);
+    restorePendingVpbuddyMessage(meetingId);
     state.selectedMaterial = "";
     state.selectedDeliverable = "";
     state.selectedDemoVersion = "";
@@ -1116,7 +1194,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
 
     const detailTranscripts = normalizeTranscriptResponse(detail.value);
     if (detailTranscripts.length) {
-      replaceArray(meetingRecords, detailTranscripts);
+      applyTranscriptSnapshot(detailTranscripts, meetingId);
     }
 
     const detailDeliverables = normalizeDeliverablesResponse(detail.value);
@@ -1137,7 +1215,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
     connected = true;
     const nextRecords = normalizeTranscriptResponse(transcript.value);
     if (nextRecords.length) {
-      replaceArray(meetingRecords, nextRecords);
+      applyTranscriptSnapshot(nextRecords, meetingId);
     }
     const stateItems = transcript.value?.state?.items || [];
     if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
@@ -1292,25 +1370,46 @@ function resetRecordingState() {
   state.recordingStartedAt = 0;
   state.recordingElapsed = 0;
   state.recordingMessage = "尚未开始录制";
-  state.liveTranscriptId = "";
+  liveTranscriptIdsByMeeting.clear();
 }
 
-function appendRealtimeTranscript(message) {
+function hasActiveRealtimeSession() {
+  return Boolean(realtimeAsrSession)
+    && ["starting", "recording", "paused", "pausing", "resuming", "stopping"].includes(state.recordingStatus);
+}
+
+function preventActiveRecordingMeetingSwitch(nextMeetingId) {
+  if (!nextMeetingId || nextMeetingId === state.selectedMeetingId || !hasActiveRealtimeSession()) return false;
+  setToast("录音进行中，请先结束当前会议再切换", false);
+  render();
+  return true;
+}
+
+function appendRealtimeTranscript(message, meetingId = state.selectedMeetingId) {
+  if (!meetingId) return;
+  const targetRecords = meetingId === state.selectedMeetingId
+    ? meetingRecords
+    : transcriptRecordStore.read(meetingId);
+  const liveTranscriptId = liveTranscriptIdsByMeeting.get(meetingId) || "";
   const next = {
-    ...normalizeTranscriptSegment(message, meetingRecords.length),
-    id: state.liveTranscriptId || createAnnotationId(),
-    live: !message.is_sentence_end
+    ...normalizeTranscriptSegment(message, targetRecords.length),
+    id: liveTranscriptId || createAnnotationId(),
+    live: !message.is_sentence_end,
+    source: "realtime"
   };
   if (!next.text) return;
-  const last = meetingRecords.at(-1);
-  if (last?.live && last.id === next.id) meetingRecords[meetingRecords.length - 1] = next;
-  else meetingRecords.push(next);
-  state.liveTranscriptId = message.is_sentence_end ? "" : next.id;
-  if (state.meetingLeftTab === "records") render();
+  const last = targetRecords.at(-1);
+  if (last?.live && last.id === next.id) targetRecords[targetRecords.length - 1] = next;
+  else targetRecords.push(next);
+  if (message.is_sentence_end) liveTranscriptIdsByMeeting.delete(meetingId);
+  else liveTranscriptIdsByMeeting.set(meetingId, next.id);
+  cacheTranscriptRecords(meetingId, targetRecords, { persist: Boolean(message.is_sentence_end) });
+  if (meetingId === state.selectedMeetingId && state.meetingLeftTab === "records") render();
 }
 
 async function startRealtimeRecording() {
   const meetingId = state.selectedMeetingId;
+  const recordingAuthToken = getAuthToken();
   if (!meetingId || state.recordingStatus === "starting" || state.recordingStatus === "recording") return;
   state.recordingStatus = "starting";
   state.recordingMessage = "正在连接麦克风与实时转写";
@@ -1320,8 +1419,12 @@ async function startRealtimeRecording() {
       baseUrl: apiBaseUrl,
       meetingId,
       getToken: getAuthToken,
-      onTranscript: appendRealtimeTranscript,
+      onTranscript: (message) => {
+        if (!recordingAuthToken || getAuthToken() !== recordingAuthToken) return;
+        appendRealtimeTranscript(message, meetingId);
+      },
       onStatus: (event) => {
+        if (meetingId !== state.selectedMeetingId) return;
         if (event.status === "recording") {
           state.recordingStatus = "recording";
           state.recordingMessage = "实时录音与转写中";
@@ -1336,10 +1439,17 @@ async function startRealtimeRecording() {
         }
       },
       onComplete: () => {
+        if (meetingId !== state.selectedMeetingId) return;
+        if (state.recordingStatus !== "stopping") {
+          realtimeAsrSession = null;
+          state.recordingStatus = "stopped";
+          stopRecordingTimer();
+        }
         state.recordingMessage = "本次录音转写已完成";
         render();
       },
       onError: (error) => {
+        if (meetingId !== state.selectedMeetingId) return;
         state.recordingStatus = "error";
         state.recordingMessage = error.message || "实时录音连接失败";
         stopRecordingTimer();
@@ -1415,6 +1525,7 @@ async function stopRealtimeRecording({ notifyBackend = false } = {}) {
   const results = await Promise.allSettled(tasks);
   realtimeAsrSession = null;
   stopRecordingTimer();
+  cacheTranscriptRecords(meetingId, meetingRecords);
   const failure = results.find((item) => item.status === "rejected");
   state.recordingStatus = failure ? "error" : "stopped";
   state.recordingMessage = failure ? `停止录制异常：${failure.reason?.message || "未知错误"}` : "录音已停止";
@@ -1461,6 +1572,9 @@ function startMeetingEvents(meetingId) {
             rememberMeetingStatus(meeting.id, meeting.status);
           }
           stopRecordingTimer();
+          if (!realtimeAsrSession && state.recordingStatus !== "stopped") {
+            void refreshTranscript(meetingId, { notify: false });
+          }
           void refreshDeliverables(meetingId);
           setToast("会议已完成，交付物和记录正在同步");
           render();
@@ -1509,9 +1623,7 @@ async function refreshTranscript(meetingId, { notify = true } = {}) {
     const payload = await api.listTranscriptSegments(meetingId);
     if (meetingId !== state.selectedMeetingId) return;
     const nextRecords = normalizeTranscriptResponse(payload);
-    if (nextRecords.length || !meetingRecords.length) {
-      replaceArray(meetingRecords, nextRecords);
-    }
+    applyTranscriptSnapshot(nextRecords, meetingId);
     const stateItems = payload?.state?.items || [];
     if (Array.isArray(stateItems)) replaceArray(meetingUnderstanding, stateItems);
     if (notify) setToast("会议记录已从后端刷新");
@@ -1521,33 +1633,94 @@ async function refreshTranscript(meetingId, { notify = true } = {}) {
   render();
 }
 
-async function sendVpbuddyChatMessage(text) {
-  if (state.chatBusy) return;
-  if (!text.trim()) {
+async function sendVpbuddyChatMessage(text, { optimisticMessageId = "" } = {}) {
+  const meetingId = state.selectedMeetingId;
+  const content = String(text || "").trim();
+  if (isVpbuddyChatBusy(meetingId)) return;
+  if (!meetingId) {
+    setToast("请先选择一场会议", false);
+    render();
+    return;
+  }
+  if (!content) {
     setToast("请输入要发送的问题", false);
     render();
     return;
   }
+
+  const requestId = `vpbuddy-chat-${++vpbuddyChatRequestSequence}`;
+  const messageId = optimisticMessageId || `local-${requestId}`;
+  let optimisticMessage = state.vpbuddyMessages.find((item) => item.id === messageId);
+  if (optimisticMessage) {
+    Object.assign(optimisticMessage, {
+      text: content,
+      status: "sending",
+      error: "",
+      localOnly: true
+    });
+  } else {
+    optimisticMessage = {
+      id: messageId,
+      time: nowTime(),
+      text: content,
+      type: "question",
+      status: "sending",
+      error: "",
+      localOnly: true
+    };
+    addVpbuddyMessage(optimisticMessage);
+  }
+  const request = {
+    id: requestId,
+    meetingId,
+    messageId,
+    message: optimisticMessage,
+    startedAt: globalThis.performance?.now?.() || Date.now()
+  };
+  pendingVpbuddyChatRequests.set(meetingId, request);
   state.chatBusy = true;
   state.composerText = "";
+  state.showComposerHistory = true;
   render();
 
   try {
-    const response = await api.sendChat(state.selectedMeetingId, text);
-    const userMessage = normalizeChatMessage(response?.user_message || { content: text, role: "user" });
-    const answer = normalizeChatMessage(response);
-    addVpbuddyMessage(userMessage);
-    addVpbuddyMessage(answer);
+    const response = await api.sendChat(meetingId, content);
+    const activeRequest = pendingVpbuddyChatRequests.get(meetingId);
+    if (activeRequest?.id !== requestId) return;
+    const elapsedMs = Math.round((globalThis.performance?.now?.() || Date.now()) - request.startedAt);
+    recordClientLog("info", "VPBuddy chat request completed", { meetingId, elapsedMs });
+    if (meetingId !== state.selectedMeetingId) return;
+
+    const userMessage = response?.user_message ? normalizeChatMessage(response.user_message) : null;
+    const assistantMessage = response?.assistant_message ? normalizeChatMessage(response.assistant_message) : null;
+    if (userMessage?.text) {
+      removeVpbuddyMessage(messageId);
+      addVpbuddyMessage(userMessage);
+    } else {
+      updateVpbuddyMessage(messageId, { status: "sent", localOnly: false, error: "" });
+    }
+    if (assistantMessage?.text) addVpbuddyMessage(assistantMessage);
     state.showComposerHistory = true;
     setApiStatus("connected", "已连接后端");
     setToast("问题已发送给 VPBuddy");
   } catch (error) {
-    state.composerText = text;
+    const activeRequest = pendingVpbuddyChatRequests.get(meetingId);
+    if (activeRequest?.id !== requestId || meetingId !== state.selectedMeetingId) return;
+    updateVpbuddyMessage(messageId, {
+      status: "failed",
+      error: error?.message || "发送失败",
+      localOnly: true
+    });
+    if (!state.composerText.trim()) state.composerText = content;
+    state.showComposerHistory = true;
     setToast(`问题发送失败：${error.message}`, false);
   } finally {
-    state.chatBusy = false;
+    if (pendingVpbuddyChatRequests.get(meetingId)?.id === requestId) {
+      pendingVpbuddyChatRequests.delete(meetingId);
+    }
+    state.chatBusy = isVpbuddyChatBusy();
+    if (meetingId === state.selectedMeetingId) render();
   }
-  render();
 }
 
 function getSettingsPayload() {
@@ -1728,6 +1901,11 @@ async function saveMeetingTitle() {
 }
 
 async function startNewMeetingFromForm() {
+  if (hasActiveRealtimeSession()) {
+    setToast("录音进行中，请先结束当前会议再创建新会议", false);
+    render();
+    return;
+  }
   const title = document.querySelector("[data-field='meeting-title']")?.value.trim() || "";
   const projectName = document.querySelector("[data-field='meeting-project']")?.value.trim() || "";
   if (!title) {
@@ -1807,6 +1985,7 @@ async function deleteMeetingById(meetingId) {
     const index = meetings.findIndex((item) => item.id === meetingId);
     if (index >= 0) meetings.splice(index, 1);
     forgetMeetingStatus(meetingId);
+    transcriptRecordStore.remove(meetingId);
     if (state.selectedMeetingId === meetingId) {
       state.selectedMeetingId = meetings[0]?.id || "";
       resetRecordingState();
@@ -2327,6 +2506,22 @@ function renderMeetingLeftPanel() {
   `;
 }
 
+function isUploadInProgress() {
+  return state.uploadProgress?.status === "uploading";
+}
+
+function startUploadProgress(context, name, total) {
+  const progress = {
+    context,
+    name,
+    current: 0,
+    total,
+    status: "uploading"
+  };
+  state.uploadProgress = progress;
+  return progress;
+}
+
 function renderUploadProgress(context) {
   const progress = state.uploadProgress;
   if (!progress || progress.context !== context) return "";
@@ -2377,11 +2572,11 @@ function renderDemoVersionControl() {
   const selected = getSelectedDemoVersion();
   if (!selected || !demoVersions.length) return "";
   return `
-    <label class="deliverable-version-control demo-version-control" data-action="demo-version-control">
+    <label class="deliverable-version-control demo-version-control" data-action="demo-version-control" title="${escapeHtml(selected.displayLabel || selected.label)}">
       <span>Demo 版本</span>
       <select class="demo-version-select" aria-label="切换 Demo 版本">
         ${demoVersions.map((item) => `
-          <option value="${item.version}" ${item.version === selected.version ? "selected" : ""}>${escapeHtml(item.label)}</option>
+          <option value="${item.version}" title="${escapeHtml(item.displayLabel || item.label)}" ${item.version === selected.version ? "selected" : ""}>${escapeHtml(item.displayLabel || item.label)}</option>
         `).join("")}
       </select>
     </label>
@@ -2444,8 +2639,10 @@ function renderDeliverableListPanel() {
 }
 
 function renderMaterialsList() {
+  const uploadBusy = isUploadInProgress();
+  const materialUploading = state.uploadProgress?.context === "material" && uploadBusy;
   return `
-    ${uiVisibility.meetingMaterialUploadButton ? `<button class="primary wide upload-button" data-action="open-upload" data-context="material">${icon("upload")}上传材料</button>` : ""}
+    ${uiVisibility.meetingMaterialUploadButton ? `<button class="primary wide upload-button" data-action="open-upload" data-context="material" ${uploadBusy ? "disabled" : ""} aria-busy="${materialUploading}">${icon("upload")}${materialUploading ? "上传中" : "上传材料"}</button>` : ""}
     ${renderUploadProgress("material")}
     <div class="material-stack">
       ${materials.length
@@ -2546,6 +2743,8 @@ function renderAnnotationLayer() {
 function renderPresentationCanvas() {
   const annotations = renderAnnotationLayer();
   const selectedMaterial = materials.find((item) => item.id === state.selectedMaterial);
+  const uploadBusy = isUploadInProgress();
+  const screenshotUploading = state.uploadProgress?.context === "vpbuddy-material" && uploadBusy;
   const colors = ["#2f8cff", "#09dba1", "#ffc94c", "#ff4f64"];
   const tools = [
     ["cursor", "指针", "arrowRight"],
@@ -2597,7 +2796,7 @@ function renderPresentationCanvas() {
           ${state.textDraft ? `<input class="annotation-text-input" value="${escapeHtml(state.textDraft.value)}" style="left:${state.textDraft.x}%;top:${state.textDraft.y}%" placeholder="输入批注" />` : ""}
         </div>
       </div>
-      <button class="stage-capture-button" data-action="capture-screenshot" title="截屏上传" aria-label="截屏上传">
+      <button class="stage-capture-button" data-action="capture-screenshot" title="截屏上传" aria-label="截屏上传" ${uploadBusy ? "disabled" : ""} aria-busy="${screenshotUploading}">
         ${icon("camera", 30)}
         <span>截屏</span>
       </button>
@@ -2661,6 +2860,8 @@ function renderDeliverableCanvas() {
 
 function renderVpbuddyComposer() {
   const messageCount = state.vpbuddyMessages.length;
+  const chatBusy = isVpbuddyChatBusy();
+  const uploadBusy = isUploadInProgress();
   const materialProgressVisible = state.uploadProgress?.context === "vpbuddy-material";
   const materialSending = state.uploadProgress?.context === "vpbuddy-material" && state.uploadProgress.status === "uploading";
   const messageMarkup = state.vpbuddyMessages.map((item) => {
@@ -2671,9 +2872,17 @@ function renderVpbuddyComposer() {
     const body = type === "answer"
       ? `<div class="message-body markdown-content">${renderedText}</div>`
       : `<p class="message-body">${type === "material" ? icon("upload", 15) : ""}<span>${renderedText}</span></p>`;
+    const messageStatus = item.status === "sending"
+      ? `<span class="message-status sending" role="status">发送中...</span>`
+      : item.status === "failed"
+        ? `<button class="message-status failed" data-action="retry-vpbuddy-message" data-message-id="${escapeHtml(String(item.id || ""))}" title="${escapeHtml(item.error || "发送失败，点击重试")}" ${chatBusy ? "disabled" : ""}>发送失败 · 重试</button>`
+        : "";
     return `
-      <article class="chat-message ${type}">
-        <div class="message-meta"><strong>${sender}</strong><time>${escapeHtml(item.time || "")}</time></div>
+      <article class="chat-message ${type} ${item.status ? `is-${escapeHtml(item.status)}` : ""}">
+        <div class="message-meta">
+          <strong>${sender}</strong>
+          <span class="message-meta-tail"><time>${escapeHtml(item.time || "")}</time>${messageStatus}</span>
+        </div>
         ${body}
       </article>
     `;
@@ -2693,8 +2902,8 @@ function renderVpbuddyComposer() {
         <textarea class="vpbuddy-input" maxlength="500" placeholder="输入你的问题、补充说明或交付要求...">${escapeHtml(state.composerText)}</textarea>
         <div class="composer-actions">
           <span class="composer-count">${state.composerText.length}/500</span>
-          <button class="primary" data-action="send-vpbuddy-message" ${state.chatBusy ? "disabled" : ""}>${icon("send", 16)}${state.chatBusy ? "发送中" : "发送问题"}</button>
-          <button class="secondary" data-action="send-vpbuddy-material" ${materialSending ? "disabled" : ""} aria-busy="${materialSending}">${icon("upload", 16)}${materialSending ? "发送中" : "发送材料"}</button>
+          <button class="primary" data-action="send-vpbuddy-message" aria-busy="${chatBusy}" ${chatBusy ? "disabled" : ""}>${icon("send", 16)}${chatBusy ? "发送中" : "发送问题"}</button>
+          <button class="secondary" data-action="send-vpbuddy-material" ${materialSending ? "disabled" : uploadBusy ? "disabled" : ""} aria-busy="${materialSending}">${icon("upload", 16)}${materialSending ? "发送中" : "发送材料"}</button>
         </div>
       </div>
       ${renderUploadProgress("vpbuddy-material")}
@@ -2715,14 +2924,12 @@ function renderAIPanel() {
         ${followups.length
           ? followups.map((item) => {
             const question = renderMarkdown(stripAssistantReasoning(item.question));
-            const reason = renderMarkdown(stripAssistantReasoning(item.reason));
             return `
               <article class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${escapeHtml(item.id)}" role="button" tabindex="0">
                 ${icon("bot", 16)}
                 <div class="followup-content">
                   <div class="followup-markdown markdown-content">${question}</div>
-                  <div class="followup-meta">${escapeHtml(item.time)} · 面向 ${escapeHtml(item.target)} · ${escapeHtml(item.status)}</div>
-                  <div class="followup-reason markdown-content">${reason}</div>
+                  ${item.time ? `<time class="followup-time">${escapeHtml(item.time)}</time>` : ""}
                 </div>
               </article>
             `;
@@ -2884,6 +3091,7 @@ function renderKnowledge() {
   const visibleDocs = getKnowledgeDocsForCurrentTab();
   const selected = getSelectedKnowledgeDoc();
   const callable = selected ? isKnowledgeCallable(selected) : false;
+  const uploadBusy = isUploadInProgress();
   const totalText = state.knowledgeLoaded && state.knowledgeTotal !== null ? state.knowledgeTotal : visibleDocs.length;
   const body = `
     <header class="page-header knowledge-head">
@@ -2894,7 +3102,7 @@ function renderKnowledge() {
       <div class="knowledge-main">
         <div class="kb-toolbar">
           <label class="field search-field"><input class="knowledge-search-input" value="${escapeHtml(state.knowledgeSearch)}" placeholder="搜索文档名称或关键词" />${icon("search")}</label>
-          <button class="primary" data-action="open-upload" data-context="knowledge">${icon("upload")}上传文档</button>
+          <button class="primary" data-action="open-upload" data-context="knowledge" ${uploadBusy ? "disabled" : ""}>${icon("upload")}上传文档</button>
         </div>
         ${renderUploadProgress("knowledge")}
         <div class="kb-table panel">
@@ -3022,28 +3230,17 @@ function renderActionModal() {
 
   if (state.modal === "followup-detail") {
     const questionMarkup = renderMarkdown(stripAssistantReasoning(selectedFollowup?.question));
-    const reasonMarkup = renderMarkdown(stripAssistantReasoning(selectedFollowup?.reason));
     return `
       <div class="modal-backdrop action-backdrop">
         <section class="action-modal panel followup-detail-modal">
           <button class="modal-close" data-action="close-modal">${icon("close")}</button>
           <header>
-            <span>${escapeHtml(selectedFollowup?.time || "")}</span>
             <h2>内容详情</h2>
-            <em>${escapeHtml(selectedFollowup?.status || "")}</em>
+            ${selectedFollowup?.time ? `<time>${escapeHtml(selectedFollowup.time)}</time>` : ""}
           </header>
           <article class="detail-question">
             <strong>内容</strong>
             <div class="modal-markdown markdown-content">${questionMarkup}</div>
-          </article>
-          <div class="lookup-meta">
-            <em>面向 ${escapeHtml(selectedFollowup?.target || "会议参与者")}</em>
-            <em>会议对话分析</em>
-            <em>待主持人确认</em>
-          </div>
-          <article class="explain-summary">
-            <strong>生成原因</strong>
-            <div class="modal-markdown markdown-content">${reasonMarkup}</div>
           </article>
           <footer>
             <button class="ghost" data-action="close-modal">关闭</button>
@@ -3360,6 +3557,7 @@ function canvasToPngBlob(canvas) {
 }
 
 async function captureStageScreenshot() {
+  if (isUploadInProgress()) return;
   const meetingId = state.selectedMeetingId;
   if (!meetingId) {
     setToast("请先创建或选择一场会议", false);
@@ -3397,11 +3595,12 @@ async function captureStageScreenshot() {
     render();
     return;
   }
+  if (isUploadInProgress()) return;
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const file = new File([blob], `投屏截图-${stamp}.png`, { type: "image/png" });
-  const progress = { context: "material", current: 0, total: 1, name: file.name, status: "uploading" };
-  state.uploadProgress = progress;
+  const progress = startUploadProgress("vpbuddy-material", file.name, 1);
+  state.meetingLeftTab = "materials";
   render();
   try {
     const uploaded = await api.uploadMaterial(meetingId, file);
@@ -3421,38 +3620,43 @@ async function captureStageScreenshot() {
     });
     state.showComposerHistory = true;
     progress.current = 1;
-    progress.status = "complete";
+    render();
 
     const refreshRevision = meetingMaterialsRevision;
-    try {
-      const payload = await api.listMaterials(meetingId);
-      if (meetingId !== state.selectedMeetingId) {
-        if (state.uploadProgress === progress) state.uploadProgress = null;
-        return;
-      }
-      if (meetingMaterialsRevision === refreshRevision) {
-        const refreshedMaterials = normalizeMaterialsResponse(payload);
-        replaceArray(materials, mergeMaterials(refreshedMaterials, [uploadedMaterial]));
-      }
-    } catch (refreshError) {
-      if (meetingId !== state.selectedMeetingId) {
-        if (state.uploadProgress === progress) state.uploadProgress = null;
-        return;
-      }
-      recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: refreshError.message });
+    const [materialList, chatHistory] = await Promise.allSettled([
+      api.listMaterials(meetingId),
+      api.listChatHistory(meetingId)
+    ]);
+    if (meetingId !== state.selectedMeetingId) {
+      if (state.uploadProgress === progress) state.uploadProgress = null;
+      return;
+    }
+    if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
+      const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
+      replaceArray(materials, mergeMaterials(refreshedMaterials, [uploadedMaterial]));
+    } else if (materialList.status === "rejected") {
+      recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: materialList.reason?.message || "unknown" });
+    }
+    if (chatHistory.status === "fulfilled") {
+      applyChatHistory(chatHistory.value);
+    } else {
+      recordClientLog("warn", "截屏已上传，但 VPBuddy 对话记录刷新失败", { message: chatHistory.reason?.message || "unknown" });
     }
 
-    if (meetingId !== state.selectedMeetingId) return;
     const uploadedId = uploadedMaterial.id;
     state.selectedMaterial = materials.some((item) => item.id === uploadedId)
       ? uploadedId
       : materials.at(-1)?.id || materials[0]?.id || "";
+    state.meetingLeftTab = "materials";
+    state.showComposerHistory = true;
+    progress.status = "complete";
     setToast(`截屏已上传为会议材料：${file.name}`);
   } catch (error) {
     if (meetingId !== state.selectedMeetingId) {
       if (state.uploadProgress === progress) state.uploadProgress = null;
       return;
     }
+    progress.current = 1;
     progress.status = "error";
     setToast(`截屏上传失败：${error.message}`, false);
   }
@@ -3592,6 +3796,7 @@ document.addEventListener("click", async (event) => {
   if (action === "open-meeting") {
     resetMeetingTitleEditState();
     const nextMeetingId = target.dataset.id || state.selectedMeetingId;
+    if (preventActiveRecordingMeetingSwitch(nextMeetingId)) return;
     const preserveActiveRecording = nextMeetingId === state.selectedMeetingId
       && Boolean(realtimeAsrSession)
       && ["starting", "recording", "paused", "pausing", "resuming"].includes(state.recordingStatus);
@@ -3610,7 +3815,9 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "open-summary") {
     resetMeetingTitleEditState();
-    state.selectedMeetingId = target.dataset.id || state.selectedMeetingId;
+    const nextMeetingId = target.dataset.id || state.selectedMeetingId;
+    if (preventActiveRecordingMeetingSwitch(nextMeetingId)) return;
+    state.selectedMeetingId = nextMeetingId;
     state.view = "summary";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
     closeMeetingEvents();
@@ -3666,6 +3873,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "open-upload") {
+    if (isUploadInProgress()) return;
     state.fileUploadContext = target.dataset.context || "material";
     const input = document.querySelector(".native-file-input");
     if (input) {
@@ -3677,6 +3885,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "capture-screenshot") {
+    if (isUploadInProgress()) return;
     await captureStageScreenshot();
     return;
   }
@@ -3715,12 +3924,20 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-followup") state.selectedFollowup = target.dataset.id;
   if (action === "toggle-composer-history") state.showComposerHistory = !state.showComposerHistory;
+  if (action === "retry-vpbuddy-message") {
+    const message = state.vpbuddyMessages.find((item) => item.id === target.dataset.messageId);
+    if (message?.status === "failed") {
+      await sendVpbuddyChatMessage(message.text, { optimisticMessageId: message.id });
+    }
+    return;
+  }
   if (action === "send-vpbuddy-message") {
     const text = state.composerText.trim();
     await sendVpbuddyChatMessage(text);
     return;
   }
   if (action === "send-vpbuddy-material") {
+    if (isUploadInProgress()) return;
     state.fileUploadContext = "vpbuddy-material";
     const input = document.querySelector(".native-file-input");
     if (input) {
@@ -3862,6 +4079,10 @@ document.addEventListener("change", async (event) => {
   if (!event.target.matches(".native-file-input")) return;
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
+  if (isUploadInProgress()) {
+    event.target.value = "";
+    return;
+  }
   const meetingId = state.selectedMeetingId;
   const names = files.map((file) => file.name).join("、");
   const context = state.fileUploadContext;
@@ -3875,8 +4096,7 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
-  const progress = { context: progressContext, current: 0, total: files.length, name: files[0].name, status: "uploading" };
-  state.uploadProgress = progress;
+  const progress = startUploadProgress(progressContext, files[0].name, files.length);
   let succeeded = 0;
   const errors = [];
   const uploadedMaterials = [];
@@ -3931,14 +4151,16 @@ document.addEventListener("change", async (event) => {
       errors.push(`${file.name}：${error.message}`);
     }
     progress.current = index + 1;
-    progress.status = errors.length ? "error" : "uploading";
     render();
   }
 
-  progress.status = errors.length ? "error" : "complete";
   if (context === "knowledge" && succeeded) {
     await loadKnowledgeFromBackend();
-    if (meetingId !== state.selectedMeetingId) return;
+    if (meetingId !== state.selectedMeetingId) {
+      if (state.uploadProgress === progress) state.uploadProgress = null;
+      event.target.value = "";
+      return;
+    }
   }
   if (context === "vpbuddy-material" && succeeded) {
     const refreshRevision = meetingMaterialsRevision;
@@ -3984,10 +4206,15 @@ document.addEventListener("change", async (event) => {
       }
       state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
     } catch (error) {
-      if (meetingId !== state.selectedMeetingId) return;
+      if (meetingId !== state.selectedMeetingId) {
+        if (state.uploadProgress === progress) state.uploadProgress = null;
+        event.target.value = "";
+        return;
+      }
       recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: error.message });
     }
   }
+  progress.status = errors.length ? "error" : "complete";
   setToast(errors.length
     ? `${succeeded}/${files.length} 个文件${context === "vpbuddy-material" ? "发送" : "上传"}成功；${errors[0]}`
     : `${names} ${context === "vpbuddy-material" ? "发送" : "上传"}成功`, false);

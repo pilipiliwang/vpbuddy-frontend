@@ -125,6 +125,26 @@ test("API diagnostics report request health without leaking query values", async
   assert.ok(!JSON.stringify(diagnostics[0]).includes("confidential customer answer"));
 });
 
+test("ordinary remote requests tolerate normal proxy latency and report clear timeouts", async () => {
+  assert.match(clientSource, /timeoutMs\s*=\s*15000/, "the default request window must accommodate a remote backend or proxy");
+
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => jwt,
+    timeoutMs: 5,
+    transport: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      }, { once: true });
+    })
+  });
+
+  await assert.rejects(
+    () => api.listMeetings(),
+    (error) => error?.code === "ETIMEDOUT" && /请求超时/.test(error.message) && /代理网络/.test(error.message)
+  );
+});
+
 test("protected API methods send the current Bearer JWT", async (t) => {
   const upload = new Blob(["contract"], { type: "text/plain" });
   const cases = [

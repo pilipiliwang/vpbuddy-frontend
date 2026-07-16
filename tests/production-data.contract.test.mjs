@@ -184,7 +184,8 @@ test("recording controls pause locally and persist records through the backend A
   assertSourceIncludes(mainSource, /if\s*\(!preserveActiveRecording\)\s*resetRecordingState\(\)/, "an active same-meeting ASR session and elapsed time must not be reset");
   assertSourceIncludes(recordsSource, /meetingRecords\.map[\s\S]{0,260}?item\.time[\s\S]{0,180}?item\.text/, "meeting records must display backend time and transcript content");
   assertSourceExcludes(recordsSource, /item\.(?:speaker|role)/, "speaker and role labels must stay hidden from the simplified transcript cards");
-  assertSourceIncludes(stylesSource, /\.record-item\s*\{[\s\S]{0,220}?grid-template-columns:\s*58px\s+minmax\(0,\s*1fr\)/, "transcript cards must reserve a compact time column and a flexible text column");
+  assertSourceIncludes(stylesSource, /\.record-item\s*\{[\s\S]{0,220}?display:\s*flex[\s\S]{0,100}?flex-direction:\s*column/, "transcript cards must stack time above the transcript body");
+  assertSourceIncludes(stylesSource, /\.record-item p\s*\{[\s\S]{0,100}?width:\s*100%/, "transcript bodies must use the full card width");
   assertSourceIncludes(stylesSource, /\.recording\.paused\s*\{[\s\S]{0,180}?color:\s*#ffd27d/, "the paused state must be visibly distinct from active recording");
 });
 
@@ -279,17 +280,21 @@ test("AI collaboration cards and details safely render Markdown without reasonin
   assertSourceIncludes(aiPanelSource, /class=["']followup-markdown markdown-content["']/, "AI collaboration cards must expose structured Markdown styling");
   assertSourceIncludes(modalSource, /<h2>内容详情<\/h2>/, "the follow-up modal must use the neutral content-detail title");
   assertSourceIncludes(modalSource, /renderMarkdown\(stripAssistantReasoning\(selectedFollowup\?\.question\)\)/, "the modal body must use the safe Markdown renderer");
-  assertSourceIncludes(modalSource, /renderMarkdown\(stripAssistantReasoning\(selectedFollowup\?\.reason\)\)/, "the modal reason must use the safe Markdown renderer");
+  assertSourceExcludes(modalSource, /selectedFollowup\?\.reason/, "the modal must not render metadata that the collaboration read API does not return");
   assertSourceIncludes(stylesSource, /\.followup-detail-modal\s*\{[\s\S]{0,180}?overflow-x:\s*hidden[\s\S]{0,100}?overscroll-behavior:\s*contain/, "the detail modal must scroll vertically without a horizontal scrollbar");
   assertSourceIncludes(stylesSource, /\.followup-detail-modal \.modal-markdown\s*\{[\s\S]{0,220}?font-size:\s*17px[\s\S]{0,100}?overflow-wrap:\s*anywhere/, "modal Markdown must be larger and break long paths safely");
 });
 
-test("Demo version controls show only compact canonical labels", () => {
+test("Demo version controls preserve backend names without overlapping adjacent actions", () => {
+  const normalizerSource = sourceBetween(mainSource, "function normalizeDemoVersion", "function normalizeDemoVersionsResponse");
   const versionSource = sourceBetween(mainSource, "function renderDemoVersionControl()", "function renderDeliverableDownloadMenu");
-  assertSourceIncludes(versionSource, /<option value=[\s\S]{0,180}?\$\{escapeHtml\(item\.label\)\}<\/option>/, "Demo options must show the canonical V-number label");
-  assertSourceExcludes(versionSource, /item\.summary/, "long Demo summaries must not enter the compact selector");
-  assertSourceIncludes(stylesSource, /\.deliverable-version-control\s*\{[\s\S]{0,220}?width:\s*178px[\s\S]{0,180}?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+58px/, "the version control must reserve stable label and selector columns");
-  assertSourceIncludes(stylesSource, /\.deliverable-version-control select\s*\{[\s\S]{0,160}?width:\s*58px[\s\S]{0,100}?max-width:\s*58px/, "the V-number selector must not expand into adjacent actions");
+  assertSourceIncludes(normalizerSource, /raw\?\.version_name[\s\S]{0,320}?raw\?\.title/, "Demo normalization must retain backend-provided version name fields");
+  assertSourceIncludes(normalizerSource, /const\s+summary\s*=\s*String\(raw\?\.summary/, "Demo normalization must retain the backend summary as a display name fallback");
+  assertSourceIncludes(normalizerSource, /displayLabel[\s\S]{0,220}?`\$\{label\}\s*·\s*\$\{backendName\}`/, "backend names must be combined with the canonical version number");
+  assertSourceIncludes(versionSource, /<option value=[\s\S]{0,260}?item\.displayLabel\s*\|\|\s*item\.label[\s\S]{0,120}?<\/option>/, "Demo options must display the complete backend version name");
+  assertSourceIncludes(stylesSource, /\.deliverable-version-control\s*\{[\s\S]{0,180}?width:\s*min\(360px,\s*100%\)[\s\S]{0,220}?grid-template-columns:\s*auto\s+minmax\(150px,\s*1fr\)/, "the version control must reserve a flexible name column");
+  assertSourceIncludes(stylesSource, /\.deliverable-version-control select\s*\{[\s\S]{0,180}?width:\s*100%[\s\S]{0,120}?max-width:\s*none[\s\S]{0,180}?text-overflow:\s*ellipsis/, "the version selector must fill its contained column without overlapping adjacent actions");
+  assertSourceIncludes(stylesSource, /\.deliverable-head\s*\{[\s\S]{0,100}?padding:\s*10px\s+0\s+14px[\s\S]{0,220}?row-gap:\s*14px/, "the Demo title and wrapped actions must keep the same vertical rhythm as other deliverables");
 });
 
 test("deliverable rows stay inside the sidebar at narrow widths", () => {
@@ -330,7 +335,7 @@ test("stage screenshots are persisted as meeting materials", () => {
   assert.notEqual(captureStart, -1, "the stage screenshot handler must exist");
   assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
   assertSourceIncludes(captureSource, /api\.listMaterials\(meetingId\)/, "the pinned meeting material list must refresh after screenshot upload");
-  assertSourceIncludes(captureSource, /context:\s*["']material["'][\s\S]{0,120}?status:\s*["']uploading["']/, "screenshot upload must expose truthful material progress");
+  assertSourceIncludes(captureSource, /startUploadProgress\(\s*["']vpbuddy-material["']\s*,\s*file\.name\s*,\s*1\s*\)/, "screenshot upload must use the same prominent VPBuddy material progress contract as manual sending");
   assertSourceExcludes(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be sent only as a chat attachment");
 });
 
