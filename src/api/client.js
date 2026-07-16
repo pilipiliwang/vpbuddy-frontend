@@ -5,7 +5,7 @@
  * @property {string} contentType Response MIME type.
  */
 
-export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDiagnostic, transport = fetch, timeoutMs = 3200 } = {}) {
+export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDiagnostic, transport = fetch, timeoutMs = 15000 } = {}) {
   const root = baseUrl.replace(/\/$/, "");
 
   function emitDiagnostic(level, message, details) {
@@ -54,11 +54,15 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     if (token) headers.Authorization = `Bearer ${token}`;
 
     let timeout = 0;
+    let timedOut = false;
     let signal = fetchOptions.signal;
     if (!signal && requestTimeoutMs && typeof AbortController !== "undefined") {
       const controller = new AbortController();
       signal = controller.signal;
-      timeout = globalThis.setTimeout(() => controller.abort(), requestTimeoutMs);
+      timeout = globalThis.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, requestTimeoutMs);
     }
 
     try {
@@ -75,13 +79,16 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
       });
       return { response, auth };
     } catch (error) {
+      const requestError = timedOut
+        ? Object.assign(new Error(`请求超时（${requestTimeoutMs}ms），请检查后端服务或代理网络`), { code: "ETIMEDOUT" })
+        : error;
       emitDiagnostic("error", "API request failed", {
         method,
         path: diagnosticPath,
         duration_ms: Date.now() - startedAt,
-        error: error?.message || String(error)
+        error: requestError?.message || String(requestError)
       });
-      throw error;
+      throw requestError;
     } finally {
       if (timeout) globalThis.clearTimeout(timeout);
     }

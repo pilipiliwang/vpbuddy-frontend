@@ -59,11 +59,47 @@ function isBlockStart(lines, index) {
   return line.includes("|") && isTableDivider(lines[index + 1] || "");
 }
 
-function renderListItem(value) {
+function matchListItem(line) {
+  const match = String(line ?? "").match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
+  if (!match) return null;
+  return {
+    indent: match[1].replace(/\t/g, "    ").length,
+    tag: /^\d/.test(match[2]) ? "ol" : "ul",
+    value: match[3]
+  };
+}
+
+function renderListItem(value, nested = "") {
   const task = value.match(/^\[([ xX])\]\s+(.+)$/);
-  if (!task) return `<li>${renderInlineMarkdown(value)}</li>`;
+  if (!task) return `<li>${renderInlineMarkdown(value)}${nested}</li>`;
   const checked = task[1].toLowerCase() === "x";
-  return `<li class="markdown-task"><input type="checkbox" disabled ${checked ? "checked" : ""} /><span>${renderInlineMarkdown(task[2])}</span></li>`;
+  return `<li class="markdown-task"><input type="checkbox" disabled ${checked ? "checked" : ""} /><span>${renderInlineMarkdown(task[2])}</span>${nested}</li>`;
+}
+
+function renderList(lines, startIndex) {
+  const first = matchListItem(lines[startIndex]);
+  if (!first) return null;
+  const items = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const item = matchListItem(lines[index]);
+    if (!item || item.indent < first.indent) break;
+    if (item.indent > first.indent) {
+      if (!items.length) break;
+      const nested = renderList(lines, index);
+      if (!nested) break;
+      items[items.length - 1].nested += nested.html;
+      index = nested.index;
+      continue;
+    }
+    if (item.tag !== first.tag) break;
+    items.push({ value: item.value, nested: "" });
+    index += 1;
+  }
+
+  const content = items.map((item) => renderListItem(item.value, item.nested)).join("");
+  return { html: `<${first.tag}>${content}</${first.tag}>`, index };
 }
 
 export function renderMarkdown(markdown) {
@@ -116,29 +152,10 @@ export function renderMarkdown(markdown) {
       continue;
     }
 
-    const unordered = line.match(/^\s*[-+*]\s+(.+)$/);
-    if (unordered) {
-      const items = [];
-      while (index < lines.length) {
-        const match = lines[index].match(/^\s*[-+*]\s+(.+)$/);
-        if (!match) break;
-        items.push(renderListItem(match[1]));
-        index += 1;
-      }
-      output.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (ordered) {
-      const items = [];
-      while (index < lines.length) {
-        const match = lines[index].match(/^\s*\d+[.)]\s+(.+)$/);
-        if (!match) break;
-        items.push(renderListItem(match[1]));
-        index += 1;
-      }
-      output.push(`<ol>${items.join("")}</ol>`);
+    const list = renderList(lines, index);
+    if (list) {
+      output.push(list.html);
+      index = list.index;
       continue;
     }
 
