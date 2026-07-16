@@ -266,7 +266,7 @@ test("AI follow-up content sits directly below the AI collaboration heading", ()
   assertSourceIncludes(stylesSource, /\.ai-panel\s*\{[\s\S]{0,180}?grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\)[\s\S]{0,120}?overflow:\s*hidden/, "the AI panel heading must stay fixed above its stream");
   assertSourceIncludes(stylesSource, /\.followup-list\s*\{[\s\S]{0,160}?grid-auto-rows:\s*max-content[\s\S]{0,240}?overflow-y:\s*auto/, "the full follow-up stream must keep content-sized cards and scroll vertically inside the panel");
   assertSourceIncludes(stylesSource, /\.followup-row\s*\{[\s\S]{0,120}?min-height:\s*max-content/, "follow-up cards must not be compressed below their content height");
-  assertSourceIncludes(stylesSource, /\.followup-row strong\s*\{[\s\S]{0,160}?display:\s*block/, "follow-up cards must grow with their question text");
+  assertSourceIncludes(stylesSource, /\.followup-content\s*\{[\s\S]{0,120}?flex:\s*1\s+1\s+0[\s\S]{0,120}?min-width:\s*0/, "follow-up Markdown must shrink within the icon row without horizontal overflow");
   assertSourceIncludes(aiPanelSource, /实时展示 Agent 协调内容[\s\S]{0,120}?自主提出会议问题/, "the empty AI stream must use a concise title and a distinct supporting line");
   assertSourceExcludes(aiPanelSource, /自主提出会议问题[\s\S]{0,120}?自主提出会议问题/, "the AI empty state must not repeat the same message");
   assertSourceExcludes(aiPanelSource, /暂无\s*AI\s*反问|当前会议的后端协同问答列表中没有待回答问题/, "the obsolete no-follow-up copy must be removed");
@@ -276,13 +276,14 @@ test("AI collaboration cards and details safely render Markdown without reasonin
   const aiPanelSource = sourceBetween(mainSource, "function renderAIPanel()", "function renderTimeline()");
   const modalSource = sourceBetween(mainSource, 'if (state.modal === "followup-detail")', 'if (state.modal === "all-explanations")');
   assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,700}?stripAssistantReasoning\(item\.question/, "collaboration DTOs must remove model reasoning before display");
-  assertSourceIncludes(aiPanelSource, /renderMarkdown\(stripAssistantReasoning\(item\.question\)\)/, "AI collaboration cards must use the safe Markdown renderer");
+  assertSourceIncludes(mainSource, /function\s+renderCollabMarkdown\s*\(value\)[\s\S]{0,160}?renderMarkdown\(stripAssistantReasoning\(value\)\)/, "collaboration content must pass through the safe Markdown renderer");
+  assertSourceIncludes(aiPanelSource, /renderCollabMarkdown\(item\.question\)/, "AI collaboration cards must use the collaboration Markdown boundary");
   assertSourceIncludes(aiPanelSource, /class=["']followup-markdown markdown-content["']/, "AI collaboration cards must expose structured Markdown styling");
   assertSourceIncludes(modalSource, /<h2>内容详情<\/h2>/, "the follow-up modal must use the neutral content-detail title");
-  assertSourceIncludes(modalSource, /renderMarkdown\(stripAssistantReasoning\(selectedFollowup\?\.question\)\)/, "the modal body must use the safe Markdown renderer");
+  assertSourceIncludes(modalSource, /renderCollabMarkdown\(selectedFollowup\?\.question\)/, "the modal body must use the collaboration Markdown boundary");
   assertSourceExcludes(modalSource, /selectedFollowup\?\.reason/, "the modal must not render metadata that the collaboration read API does not return");
   assertSourceIncludes(stylesSource, /\.followup-detail-modal\s*\{[\s\S]{0,180}?overflow-x:\s*hidden[\s\S]{0,100}?overscroll-behavior:\s*contain/, "the detail modal must scroll vertically without a horizontal scrollbar");
-  assertSourceIncludes(stylesSource, /\.followup-detail-modal \.modal-markdown\s*\{[\s\S]{0,220}?font-size:\s*17px[\s\S]{0,100}?overflow-wrap:\s*anywhere/, "modal Markdown must be larger and break long paths safely");
+  assertSourceIncludes(stylesSource, /\.followup-detail-modal \.modal-markdown\s*\{[\s\S]{0,220}?font-size:\s*1rem[\s\S]{0,100}?overflow-wrap:\s*anywhere/, "modal Markdown must use scalable type and break long paths safely");
 });
 
 test("Demo version controls preserve backend names without overlapping adjacent actions", () => {

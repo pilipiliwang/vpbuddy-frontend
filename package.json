@@ -8,15 +8,21 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
+    "test": "node --test",
+    "test:release-contract": "node --test tests/release-integrity.contract.test.mjs",
     "desktop": "electron .",
     "desktop:dir": "electron-builder --dir",
     "desktop:build": "npm run desktop:build:win",
     "desktop:build:win": "electron-builder --win nsis portable --x64 --publish never",
-    "desktop:build:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never"
+    "desktop:build:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never",
+    "release:aliases:windows": "node scripts/release-assets.mjs prepare windows release",
+    "release:aliases:macos": "node scripts/release-assets.mjs prepare macos release",
+    "release:verify": "node scripts/release-assets.mjs verify artifacts"
   },
   "devDependencies": {
     "electron": "^43.0.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "js-yaml": "^4.1.0"
   },
   "build": {
     "appId": "com.vpbuddy.desktop",

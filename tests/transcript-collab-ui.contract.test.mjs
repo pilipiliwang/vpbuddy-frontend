@@ -30,7 +30,7 @@ function loadReasoningStripper() {
   const source = sourceBetween(
     mainSource,
     "function stripAssistantReasoning(value)",
-    "function normalizeCollabQuestions(payload)"
+    "function renderCollabMarkdown(value)"
   );
   return vm.runInNewContext(`(${source.trim()})`);
 }
@@ -52,8 +52,10 @@ test("transcript cards stack time above a full-width body", () => {
 });
 
 test("AI collaboration cards use stripped, safe Markdown output", () => {
+  const renderer = sourceBetween(mainSource, "function renderCollabMarkdown", "function normalizeCollabQuestions");
   const panel = sourceBetween(mainSource, "function renderAIPanel()", "function renderTimeline()");
-  assert.match(panel, /renderMarkdown\(stripAssistantReasoning\(item\.question\)\)/);
+  assert.match(renderer, /return\s+renderMarkdown\(stripAssistantReasoning\(value\)\)/);
+  assert.match(panel, /renderCollabMarkdown\(item\.question\)/);
   assert.match(panel, /class="followup-markdown markdown-content"/);
   assert.doesNotMatch(panel, /\$\{\s*item\.question\s*\}/);
   assert.doesNotMatch(panel, /item\.reason/, "frontend-only reason metadata must not be rendered");
