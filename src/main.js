@@ -1,5 +1,6 @@
 import { createVpbuddyApi } from "./api/client.js";
 import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
+import { filterPersonalKnowledgeDocuments } from "./utils/knowledge.js";
 import { renderMarkdown } from "./utils/markdown.js";
 import { createTranscriptRecordStore, reconcileTranscriptRecords } from "./utils/transcript.js";
 import { createZipBlob } from "./utils/zip.js";
@@ -68,6 +69,8 @@ const state = {
   presentationUrl: "",
   presentationMime: "",
   presentationName: "",
+  presentationLoading: false,
+  presentationError: "",
   recordingStatus: "idle",
   recordingStartedAt: 0,
   recordingElapsed: 0,
@@ -109,6 +112,7 @@ let materialPreviewLoadSequence = 0;
 let meetingMaterialsRevision = 0;
 let vpbuddyChatRequestSequence = 0;
 const pendingVpbuddyChatRequests = new Map();
+const materialPreviewDownloadCache = new Map();
 
 const user = {
   name: "VPBuddy 用户",
@@ -460,7 +464,8 @@ function updateAppMarkup(nextMarkup) {
       .find((candidate) => candidate.dataset.stableDemoFrame === key);
     return nextFrame && currentFrame.getAttribute("src") === nextFrame.getAttribute("src");
   });
-  if (canPreserveFrame) patchDomChildren(app, template.content);
+  const preserveFullscreenElement = Boolean(document.fullscreenElement && app.contains(document.fullscreenElement));
+  if (canPreserveFrame || preserveFullscreenElement) patchDomChildren(app, template.content);
   else app.innerHTML = nextMarkup;
 }
 
@@ -733,7 +738,7 @@ function normalizeKnowledgeDoc(raw, index = 0) {
 
 function normalizeKnowledgeResponse(payload) {
   const list = Array.isArray(payload) ? payload : payload?.docs || payload?.documents || payload?.files || payload?.items || payload?.data || [];
-  return list.map(normalizeKnowledgeDoc);
+  return filterPersonalKnowledgeDocuments(list).map(normalizeKnowledgeDoc);
 }
 
 function secondsToTime(seconds) {
@@ -941,6 +946,10 @@ function stripAssistantReasoning(value) {
     .trim();
 }
 
+function renderCollabMarkdown(value) {
+  return renderMarkdown(stripAssistantReasoning(value));
+}
+
 function normalizeCollabQuestions(payload) {
   const pending = Array.isArray(payload?.pending) ? payload.pending : [];
   return pending.map((item, index) => ({
@@ -1008,6 +1017,7 @@ function resetAuthenticatedSession(message = "") {
   closeMeetingEvents();
   resetRecordingState();
   clearPresentationPreview();
+  clearMaterialPreviewDownloadCache();
   for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, todoItems]) {
     replaceArray(collection, []);
   }
@@ -1152,6 +1162,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
     state.showComposerHistory = false;
     state.showDeliverableDownloadMenu = false;
     clearPresentationPreview();
+    clearMaterialPreviewDownloadCache();
   }
   render();
 
@@ -1277,7 +1288,7 @@ async function loadKnowledgeFromBackend() {
     const nextDocs = normalizeKnowledgeResponse(payload);
     replaceArray(knowledgeDocs, nextDocs);
     state.knowledgeLoaded = true;
-    state.knowledgeTotal = Number.isFinite(Number(payload?.total)) ? Number(payload.total) : nextDocs.length;
+    state.knowledgeTotal = nextDocs.length;
     state.knowledgeMessage = nextDocs.length ? "" : "后端知识库当前没有文档。";
     state.knowledgeCallable = Object.fromEntries(nextDocs.map((doc) => [doc.id, doc.meetingCallable]));
     state.selectedKnowledge = nextDocs[0]?.id || "";
@@ -1305,7 +1316,7 @@ async function searchKnowledgeFromBackend() {
     const payload = await api.searchKnowledge({ query, scope: "personal_kb", top_k: 20 });
     const nextDocs = normalizeKnowledgeResponse(payload?.results || payload);
     replaceArray(knowledgeDocs, nextDocs);
-    state.knowledgeTotal = Number(payload?.count ?? nextDocs.length);
+    state.knowledgeTotal = nextDocs.length;
     state.selectedKnowledge = nextDocs[0]?.id || "";
     state.knowledgeMessage = nextDocs.length ? "" : "没有找到相关知识内容。";
   } catch (error) {
@@ -1331,6 +1342,41 @@ function clearPresentationPreview() {
   state.presentationUrl = "";
   state.presentationMime = "";
   state.presentationName = "";
+  state.presentationLoading = false;
+  state.presentationError = "";
+}
+
+function getMaterialPreviewCacheKeys(material, meetingId = state.selectedMeetingId, includeName = true) {
+  const prefix = String(meetingId || "");
+  const keys = [];
+  if (material?.id) keys.push(`${prefix}:id:${material.id}`);
+  if (includeName && material?.name) keys.push(`${prefix}:name:${String(material.name).trim().toLowerCase()}`);
+  return keys;
+}
+
+function cacheMaterialPreviewDownload(material, download, meetingId = state.selectedMeetingId, includeName = false) {
+  if (!download?.blob) return download;
+  const cachedDownload = {
+    blob: download.blob,
+    filename: download.filename || material?.name || "",
+    contentType: download.contentType || download.blob.type || material?.contentType || ""
+  };
+  for (const key of getMaterialPreviewCacheKeys(material, meetingId, includeName)) {
+    materialPreviewDownloadCache.set(key, cachedDownload);
+  }
+  return cachedDownload;
+}
+
+function getCachedMaterialPreviewDownload(material, meetingId = state.selectedMeetingId) {
+  for (const key of getMaterialPreviewCacheKeys(material, meetingId)) {
+    const cachedDownload = materialPreviewDownloadCache.get(key);
+    if (cachedDownload) return cachedDownload;
+  }
+  return null;
+}
+
+function clearMaterialPreviewDownloadCache() {
+  materialPreviewDownloadCache.clear();
 }
 
 function formatRecordingTime(totalSeconds) {
@@ -2115,22 +2161,34 @@ async function loadMaterialPreview(materialId) {
   clearPresentationPreview();
   const loadSequence = materialPreviewLoadSequence;
   state.presentationName = material.name;
+  state.presentationLoading = true;
+  render();
   try {
-    const download = await api.downloadMaterial(materialId);
+    let download = getCachedMaterialPreviewDownload(material);
+    if (!download) {
+      download = await api.downloadMaterial(materialId);
+      if (loadSequence !== materialPreviewLoadSequence) return;
+      download = cacheMaterialPreviewDownload(material, download);
+    }
     if (loadSequence !== materialPreviewLoadSequence) return;
     const resolvedMime = resolveMaterialPreviewMime(material, download);
     state.presentationMime = resolvedMime;
     if (resolvedMime) {
       const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
       state.presentationUrl = URL.createObjectURL(previewBlob);
+    } else {
+      state.presentationError = "当前文件格式暂不支持直接预览";
     }
     setToast(state.presentationUrl ? `${material.name} 已投屏` : `${material.name} 已选中；该格式需后端提供页面预览`);
   } catch (error) {
     if (loadSequence !== materialPreviewLoadSequence) return;
-    state.presentationName = "";
+    state.presentationError = `材料读取失败：${error.message}`;
     setToast(`材料读取失败：${error.message}`, false);
+  } finally {
+    if (loadSequence !== materialPreviewLoadSequence) return;
+    state.presentationLoading = false;
+    render();
   }
-  render();
 }
 
 async function presentMaterial(materialId) {
@@ -2740,6 +2798,33 @@ function renderAnnotationLayer() {
   return { svg, textNotes };
 }
 
+function renderMaterialPreviewContent(selectedMaterial) {
+  const materialName = state.presentationName || selectedMaterial?.name || "会议材料";
+  if (state.presentationLoading) {
+    return `
+      <div class="material-preview-status" role="status" aria-live="polite" aria-busy="true">
+        <i class="meeting-loading-spinner"></i>
+        <strong>正在准备投屏预览</strong>
+        <span>正在读取 ${escapeHtml(materialName)}</span>
+      </div>
+    `;
+  }
+  if (state.presentationUrl && state.presentationMime.startsWith("image/")) {
+    return `<img src="${state.presentationUrl}" alt="${escapeHtml(materialName)}" />`;
+  }
+  if (state.presentationUrl && state.presentationMime.includes("pdf")) {
+    return `<iframe class="material-pdf-preview" src="${state.presentationUrl}" title="${escapeHtml(materialName)}"></iframe>`;
+  }
+  if (state.presentationError) {
+    return renderEmptyState(materialName, state.presentationError, "stage-empty material-preview-error");
+  }
+  return renderEmptyState(
+    state.presentationName || selectedMaterial?.name || "暂无投屏内容",
+    selectedMaterial ? "双击左侧材料以读取原文件；当前格式如无法直接预览，需要后端补充页面转换接口。" : "上传本次会议材料后，可从左侧清单选择并投屏。",
+    "stage-empty"
+  );
+}
+
 function renderPresentationCanvas() {
   const annotations = renderAnnotationLayer();
   const selectedMaterial = materials.find((item) => item.id === state.selectedMaterial);
@@ -2781,15 +2866,7 @@ function renderPresentationCanvas() {
     </div>
     <div class="slide-frame annotation-canvas tool-${state.activeTool}">
       <div class="stage-zoom-layer" style="--stage-zoom:${state.zoom / 100}">
-        ${state.presentationUrl && state.presentationMime.startsWith("image/")
-          ? `<img src="${state.presentationUrl}" alt="${escapeHtml(state.presentationName || selectedMaterial?.name || "会议材料")}" />`
-          : state.presentationUrl && state.presentationMime.includes("pdf")
-            ? `<iframe class="material-pdf-preview" src="${state.presentationUrl}" title="${escapeHtml(state.presentationName || selectedMaterial?.name || "会议材料")}"></iframe>`
-            : renderEmptyState(
-                state.presentationName || selectedMaterial?.name || "暂无投屏内容",
-                selectedMaterial ? "双击左侧材料以读取原文件；当前格式如无法直接预览，需要后端补充页面转换接口。" : "上传本次会议材料后，可从左侧清单选择并投屏。",
-                "stage-empty"
-              )}
+        ${renderMaterialPreviewContent(selectedMaterial)}
         <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
         <div class="annotation-text-layer">
           ${annotations.textNotes}
@@ -2801,9 +2878,7 @@ function renderPresentationCanvas() {
         <span>截屏</span>
       </button>
     </div>
-    <div class="thumb-strip">
-      <span class="thumb-empty">${selectedMaterial ? "后端尚未提供材料页面缩略图" : "选择材料后显示页面导航"}</span>
-    </div>
+    ${selectedMaterial ? "" : `<div class="thumb-strip"><span class="thumb-empty">选择材料后显示页面导航</span></div>`}
   `;
 }
 
@@ -2923,7 +2998,7 @@ function renderAIPanel() {
       <div class="followup-list">
         ${followups.length
           ? followups.map((item) => {
-            const question = renderMarkdown(stripAssistantReasoning(item.question));
+            const question = renderCollabMarkdown(item.question);
             return `
               <article class="question-row followup-row ${state.selectedFollowup === item.id ? "active" : ""}" data-action="open-followup" data-id="${escapeHtml(item.id)}" role="button" tabindex="0">
                 ${icon("bot", 16)}
@@ -3106,18 +3181,34 @@ function renderKnowledge() {
         </div>
         ${renderUploadProgress("knowledge")}
         <div class="kb-table panel">
-          <div class="kb-row kb-head"><span>名称</span><span>类型</span><span>更新时间</span><span>状态</span><span>操作</span></div>
+          <div class="kb-row kb-head">
+            <span class="kb-name-heading">名称</span>
+            <span class="kb-type-heading">类型</span>
+            <span class="kb-updated-heading">更新时间</span>
+            <span class="kb-status-heading">状态</span>
+            <span class="kb-action-heading">操作</span>
+          </div>
           ${visibleDocs.length ? visibleDocs.map((doc) => {
             const docCallable = isKnowledgeCallable(doc);
             const deleting = state.deletingKnowledgeId === doc.id;
             return `<div class="kb-document-row ${doc.id === selected?.id ? "active" : ""} ${deleting ? "deleting" : ""}">
               <button class="kb-row-main" data-action="knowledge-select" data-id="${escapeHtml(doc.id)}">
-                <span>${docBadge(doc.type)}${escapeHtml(doc.name)}</span><span>${escapeHtml(doc.type.toUpperCase())}</span><span>${escapeHtml(doc.updated)}</span><span><i class="status-dot ${docCallable ? "on" : "off"}"></i>${docCallable ? "可供会议检索" : "当前未启用"}</span>
+                <span class="kb-name-cell">${docBadge(doc.type)}${escapeHtml(doc.name)}</span>
+                <span class="kb-type-cell">${escapeHtml(doc.type.toUpperCase())}</span>
+                <span class="kb-updated-cell">${escapeHtml(doc.updated)}</span>
+                <span class="kb-status-cell"><i class="status-dot ${docCallable ? "on" : "off"}" aria-hidden="true"></i><span class="kb-status-label">${docCallable ? "可供会议检索" : "当前未启用"}</span></span>
               </button>
               <button class="kb-delete-button" data-action="delete-knowledge" data-id="${escapeHtml(doc.id)}" title="删除 ${escapeHtml(doc.name)}" aria-label="删除 ${escapeHtml(doc.name)}" ${deleting ? "disabled" : ""}>${icon("trash", 17)}</button>
             </div>`;
           }).join("") : `<div class="kb-empty">${state.knowledgeMessage || "没有匹配的知识文档"}</div>`}
-          <footer>共 ${visibleDocs.length} 条 <button data-action="toast" data-message="已经是第一页">‹</button><button data-action="toast" data-message="当前第 1 页">1</button><button data-action="toast" data-message="没有更多页">›</button></footer>
+          <footer>
+            <span class="kb-pagination-total">共 ${visibleDocs.length} 条</span>
+            <nav class="kb-pagination-controls" aria-label="知识库分页">
+              <button data-action="toast" data-message="已经是第一页" aria-label="上一页">‹</button>
+              <button data-action="toast" data-message="当前第 1 页" aria-label="第 1 页">1</button>
+              <button data-action="toast" data-message="没有更多页" aria-label="下一页">›</button>
+            </nav>
+          </footer>
         </div>
       </div>
       ${uiVisibility.knowledgeDetailPanel ? (selected ? `<aside class="knowledge-detail panel">
@@ -3229,7 +3320,7 @@ function renderActionModal() {
   }
 
   if (state.modal === "followup-detail") {
-    const questionMarkup = renderMarkdown(stripAssistantReasoning(selectedFollowup?.question));
+    const questionMarkup = renderCollabMarkdown(selectedFollowup?.question);
     return `
       <div class="modal-backdrop action-backdrop">
         <section class="action-modal panel followup-detail-modal">
@@ -3610,6 +3701,14 @@ async function captureStageScreenshot() {
     }
     meetingMaterialsRevision += 1;
     const uploadedMaterial = normalizeUploadedMaterialResponse(uploaded, materials.length);
+    if (/^Material \d+$/.test(uploadedMaterial.name)) uploadedMaterial.name = file.name;
+    uploadedMaterial.type = "image";
+    uploadedMaterial.contentType = "image/png";
+    cacheMaterialPreviewDownload(uploadedMaterial, {
+      blob: file,
+      filename: file.name,
+      contentType: file.type
+    }, meetingId, true);
     replaceArray(materials, mergeMaterials(materials, [uploadedMaterial]));
     addVpbuddyMessage({
       time: nowTime(),
@@ -3997,7 +4096,7 @@ document.addEventListener("click", async (event) => {
   if (action === "select-slide") state.currentSlide = Number(target.dataset.slide);
   if (action === "slide-step") {
     state.currentSlide = 1;
-    setToast("后端尚未提供材料页面缩略图与翻页接口", false);
+    setToast("当前材料暂不支持翻页", false);
   }
   if (action === "concept-search") {
     state.modal = "concept-search";
