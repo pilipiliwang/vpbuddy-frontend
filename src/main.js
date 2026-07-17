@@ -39,6 +39,7 @@ const state = {
   meetingDetailLoading: false,
   loadedMeetingDetailId: "",
   meetingLeftTab: "records",
+  deliverableLeftTab: "deliverables",
   selectedKnowledge: "",
   selectedMeetingId: "",
   meetingTitleEditing: false,
@@ -1428,6 +1429,12 @@ function preventActiveRecordingMeetingSwitch(nextMeetingId) {
   return true;
 }
 
+function areMeetingRecordsVisible() {
+  return state.stageTab === "deliverable"
+    ? state.deliverableLeftTab === "records"
+    : state.meetingLeftTab === "records";
+}
+
 function appendRealtimeTranscript(message, meetingId = state.selectedMeetingId) {
   if (!meetingId) return;
   const targetRecords = meetingId === state.selectedMeetingId
@@ -1447,7 +1454,7 @@ function appendRealtimeTranscript(message, meetingId = state.selectedMeetingId) 
   if (message.is_sentence_end) liveTranscriptIdsByMeeting.delete(meetingId);
   else liveTranscriptIdsByMeeting.set(meetingId, next.id);
   cacheTranscriptRecords(meetingId, targetRecords, { persist: Boolean(message.is_sentence_end) });
-  if (meetingId === state.selectedMeetingId && state.meetingLeftTab === "records") render();
+  if (meetingId === state.selectedMeetingId && areMeetingRecordsVisible()) render();
 }
 
 async function startRealtimeRecording() {
@@ -1972,6 +1979,7 @@ async function startNewMeetingFromForm() {
     state.view = "meeting";
     state.stageTab = "presentation";
     state.meetingLeftTab = "records";
+    state.deliverableLeftTab = "deliverables";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== meeting.id;
     resetRecordingState();
     setApiStatus("connected", "新会议已由后端创建");
@@ -2538,6 +2546,10 @@ function renderMeetingStage() {
         : paused
           ? "继续录制"
         : state.recordingStatus === "error" ? "重试录制" : "开始录制";
+  const recordingControlLabel = running ? recordingLabel : "已结束";
+  const recordingAriaLabel = running
+    ? `${recordingControlLabel}：${state.recordingMessage}`
+    : "会议已结束，无法录制";
   return `
     <main class="stage-screen">
       <header class="stage-topbar">
@@ -2559,8 +2571,18 @@ function renderMeetingStage() {
               <button class="stage-title-edit-action cancel" data-action="cancel-meeting-title" title="取消修改" aria-label="取消修改" ${state.meetingTitleSaving ? "disabled" : ""}>${icon("close", 17)}</button>
             </label>
           ` : `<h1 class="stage-meeting-title" data-role="meeting-title" title="双击修改会议名称">${escapeHtml(meeting?.title || "会议空间")}</h1>`}
-          <button class="recording ${recording ? "active" : ""} ${paused ? "paused" : ""} ${state.recordingStatus}" data-action="toggle-recording" title="${escapeHtml(state.recordingMessage)}" ${!running || recordingBusy || state.meetingDetailLoading ? "disabled" : ""}><i></i>${running ? recordingLabel : "已结束"}</button>
-          <span class="timer">${formatRecordingTime(state.recordingElapsed)}</span>
+          <button
+            class="recording ${recording ? "active" : ""} ${state.recordingStatus}"
+            data-action="toggle-recording"
+            data-recording-state="${state.recordingStatus}"
+            title="${escapeHtml(state.recordingMessage)}"
+            aria-label="${escapeHtml(recordingAriaLabel)}"
+            aria-pressed="${recording}"
+            aria-busy="${recordingBusy}"
+            aria-describedby="recording-timer"
+            ${!running || recordingBusy || state.meetingDetailLoading ? "disabled" : ""}
+          ><i aria-hidden="true"></i><span class="recording-label">${recordingControlLabel}</span></button>
+          <span class="timer" id="recording-timer" role="timer">${formatRecordingTime(state.recordingElapsed)}</span>
         </div>
         <div class="stage-actions">
           <button class="danger" data-action="end-meeting" ${state.endingMeeting || state.meetingDetailLoading ? "disabled" : ""}>${icon("power")}${state.endingMeeting ? "结束中" : "结束会议"}</button>
@@ -2716,23 +2738,34 @@ function renderDeliverableDownloadMenu(current) {
 }
 
 function renderDeliverableListPanel() {
+  const tab = state.deliverableLeftTab === "records" ? "records" : "deliverables";
+  return `
+    <aside class="meeting-left panel" data-sidebar="deliverable">
+      <div class="panel-tabs" role="tablist" aria-label="交付物侧栏">
+        <button class="${tab === "records" ? "active" : ""}" data-action="deliverable-left-tab" data-tab="records" role="tab" aria-selected="${tab === "records"}">会议记录</button>
+        <button class="${tab === "deliverables" ? "active" : ""}" data-action="deliverable-left-tab" data-tab="deliverables" role="tab" aria-selected="${tab === "deliverables"}">交付物列表</button>
+      </div>
+      ${tab === "records" ? renderMeetingRecords() : renderDeliverableList()}
+    </aside>
+  `;
+}
+
+function renderDeliverableList() {
   const orderedDeliverables = getOrderedDeliverables();
   return `
-    <aside class="meeting-left panel">
-      <header class="deliverable-list-head">
-        <h2>交付物列表</h2>
-        <p>会中持续生成，可切换版本并回到会议证据。</p>
-      </header>
-      <div class="deliverable-stack">
-        ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
-          <button class="deliverable-row ${canonicalDeliverableKind(item.kind) === "demo" ? "is-demo" : ""} ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
-            ${docBadge(item.type)}
-            <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
-            ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
-          </button>
-        `).join("") : renderEmptyState("暂无交付物", "后端尚未生成本次会议的交付物。", "stack-empty")}
-      </div>
-    </aside>
+    <header class="deliverable-list-head">
+      <h2>交付物列表</h2>
+      <p>会中持续生成，可切换版本并回到会议证据。</p>
+    </header>
+    <div class="deliverable-stack">
+      ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
+        <button class="deliverable-row ${canonicalDeliverableKind(item.kind) === "demo" ? "is-demo" : ""} ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
+          ${docBadge(item.type)}
+          <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
+          ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
+        </button>
+      `).join("") : renderEmptyState("暂无交付物", "后端尚未生成本次会议的交付物。", "stack-empty")}
+    </div>
   `;
 }
 
@@ -3957,6 +3990,7 @@ document.addEventListener("click", async (event) => {
     state.stageFullscreen = false;
     document.body.classList.remove("stage-fullscreen-active");
     state.meetingLeftTab = "records";
+    state.deliverableLeftTab = "deliverables";
     state.view = "meeting";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
     render();
@@ -4004,9 +4038,15 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "stage-tab") {
     state.stageTab = target.dataset.tab;
-    if (state.stageTab === "deliverable") state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    if (state.stageTab === "deliverable") {
+      state.deliverableLeftTab = "deliverables";
+      state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    }
   }
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
+  if (action === "deliverable-left-tab") {
+    state.deliverableLeftTab = target.dataset.tab === "records" ? "records" : "deliverables";
+  }
   if (action === "knowledge-select") state.selectedKnowledge = target.dataset.id;
   if (action === "toggle-knowledge-callable") {
     const doc = knowledgeDocs.find((item) => item.id === target.dataset.id) || getSelectedKnowledgeDoc();
