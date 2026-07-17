@@ -1,5 +1,31 @@
 # VPBuddy Releases
 
+## v0.1.2 · 2026-07-17
+
+### Windows
+
+- [Windows 安装版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.2/VPBuddy-Setup-0.1.2-x64.exe)：标准安装程序，可创建桌面和开始菜单快捷方式。
+- [Windows 便携版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.2/VPBuddy-Portable-0.1.2-x64.exe)：无需安装，直接运行。
+
+### macOS
+
+- [Apple Silicon 版（arm64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.2/VPBuddy-0.1.2-mac-arm64.dmg)：适用于 Apple M 系列芯片。
+- [Intel 版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.2/VPBuddy-0.1.2-mac-x64.dmg)：适用于 Intel 芯片 Mac。
+
+### 主要更新
+
+- 优化登录输入框焦点样式，去掉输入框内部突兀的蓝色矩形，同时保留清晰的键盘焦点提示。
+- Windows 客户端、安装器、便携版、快捷方式和 macOS 应用统一使用蓝紫色抽象 V 品牌图标。
+- Electron 客户端按 Windows DPI、可用工作区和有效 CSS 视口动态适配桌面专用缩放，改善高分屏下文字及控件过大的问题。
+- 桌面缩放支持窗口移动、换屏、尺寸变化和 DPI 变化，并提供有边界的环境变量覆盖；浏览器开发模式不受影响。
+- Release 下载区按版本号、发布日期和平台整理，只保留 4 个面向用户的版本化安装文件。
+
+### 校验
+
+- 登录焦点、桌面图标、显示缩放与 Release 资产均新增自动化契约测试。
+- Windows 安装版和便携版完成实际构建及图标资源核对。
+- GitHub Actions 根据 `v0.1.2` tag 构建，并在发布前严格校验版本号和 4 个公开资产。
+
 ## v0.1.1 · 2026-07-17
 
 ### Windows
