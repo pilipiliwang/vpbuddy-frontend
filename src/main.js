@@ -1,6 +1,11 @@
 import { createVpbuddyApi } from "./api/client.js";
 import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
+import {
+  normalizeCollabQuestions as normalizeCollabQuestionPayload,
+  stripAssistantReasoning as normalizeAssistantMarkdown
+} from "./utils/collaboration.js";
 import { filterPersonalKnowledgeDocuments } from "./utils/knowledge.js";
+import { aggregateMaterialProcessingPhase, resolveMaterialProcessingPhases } from "./utils/material-upload.js";
 import { renderMarkdown } from "./utils/markdown.js";
 import { createTranscriptRecordStore, reconcileTranscriptRecords } from "./utils/transcript.js";
 import { createZipBlob } from "./utils/zip.js";
@@ -35,6 +40,7 @@ const state = {
   meetingDetailLoading: false,
   loadedMeetingDetailId: "",
   meetingLeftTab: "records",
+  deliverableLeftTab: "deliverables",
   selectedKnowledge: "",
   selectedMeetingId: "",
   meetingTitleEditing: false,
@@ -53,6 +59,8 @@ const state = {
   annotationColor: "#2f8cff",
   penSize: 4,
   annotations: [],
+  annotationUndoStack: [],
+  annotationRedoStack: [],
   drawingAnnotationId: "",
   textDraft: null,
   composerText: "",
@@ -72,6 +80,8 @@ const state = {
   presentationText: "",
   presentationLoading: false,
   presentationError: "",
+  presentationPdfPageCount: 0,
+  presentationPdfError: "",
   recordingStatus: "idle",
   recordingStartedAt: 0,
   recordingElapsed: 0,
@@ -112,6 +122,11 @@ let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
 let meetingMaterialsRevision = 0;
 let vpbuddyChatRequestSequence = 0;
+let presentationPreviewBlob = null;
+let pdfRendererModulePromise = null;
+let html2canvasModulePromise = null;
+let pdfResizeTimer = 0;
+let pdfPreviewRuntime = createEmptyPdfPreviewRuntime();
 const pendingVpbuddyChatRequests = new Map();
 const materialPreviewDownloadCache = new Map();
 
@@ -212,6 +227,8 @@ const iconPaths = {
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4"/><path d="m15.4 6.5-6.8 4"/>',
   sparkle: '<path d="M12 3 9.8 8.8 4 11l5.8 2.2L12 19l2.2-5.8L20 11l-5.8-2.2Z"/><path d="M19 3v4"/><path d="M21 5h-4"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v2"/><path d="m19 6-1 14c-.1 1.1-1 2-2 2H8c-1 0-1.9-.9-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v4"/>',
+  redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9h-9a7 7 0 0 0-7 7v4"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
   user: '<path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/>',
   zoom: '<path d="M5 12h14"/><path d="M12 5v14"/>'
@@ -419,6 +436,16 @@ function patchDomNode(current, next) {
     return;
   }
 
+  const stableStageSurface = current.dataset.stableStageSurface;
+  if (
+    stableStageSurface
+    && stableStageSurface === next.dataset.stableStageSurface
+    && current.dataset.stableStageSource === next.dataset.stableStageSource
+  ) {
+    syncDomAttributes(current, next);
+    return;
+  }
+
   const stableFrameKey = current.dataset.stableDemoFrame;
   if (
     current.tagName === "IFRAME"
@@ -458,6 +485,14 @@ function patchDomChildren(currentParent, nextParent) {
 function updateAppMarkup(nextMarkup) {
   const template = document.createElement("template");
   template.innerHTML = nextMarkup;
+  const stableStageSurfaces = Array.from(app.querySelectorAll("[data-stable-stage-surface]"));
+  const canPreserveStageSurface = stableStageSurfaces.some((currentSurface) => {
+    const key = currentSurface.dataset.stableStageSurface;
+    const source = currentSurface.dataset.stableStageSource;
+    const nextSurface = Array.from(template.content.querySelectorAll("[data-stable-stage-surface]"))
+      .find((candidate) => candidate.dataset.stableStageSurface === key);
+    return nextSurface && source === nextSurface.dataset.stableStageSource;
+  });
   const stableFrames = Array.from(app.querySelectorAll("iframe[data-stable-demo-frame]"));
   const canPreserveFrame = stableFrames.some((currentFrame) => {
     const key = currentFrame.dataset.stableDemoFrame;
@@ -466,7 +501,7 @@ function updateAppMarkup(nextMarkup) {
     return nextFrame && currentFrame.getAttribute("src") === nextFrame.getAttribute("src");
   });
   const preserveFullscreenElement = Boolean(document.fullscreenElement && app.contains(document.fullscreenElement));
-  if (canPreserveFrame || preserveFullscreenElement) patchDomChildren(app, template.content);
+  if (canPreserveFrame || preserveFullscreenElement || canPreserveStageSurface) patchDomChildren(app, template.content);
   else app.innerHTML = nextMarkup;
 }
 
@@ -480,9 +515,11 @@ function render() {
     settings: renderSettings
   };
 
-  updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`);
+  updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}`);
+  ensureFilePicker();
   requestAnimationFrame(() => {
     updateAnnotationViewport();
+    void ensurePdfPreviewMounted();
     if (state.meetingTitleEditing && !state.meetingTitleSaving) {
       const titleInput = document.querySelector(".stage-title-input");
       if (titleInput) {
@@ -503,7 +540,29 @@ function render() {
 }
 
 function renderFilePicker() {
-  return `<input class="native-file-input" type="file" multiple accept=".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" />`;
+  return `<input class="native-file-input" data-stable-file-picker type="file" multiple accept=".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" />`;
+}
+
+function ensureFilePicker() {
+  let input = document.querySelector(".native-file-input[data-stable-file-picker]");
+  if (input) return input;
+  const template = document.createElement("template");
+  template.innerHTML = renderFilePicker();
+  input = template.content.firstElementChild;
+  document.body.appendChild(input);
+  return input;
+}
+
+function openFilePicker(context, accept) {
+  if (isUploadInProgress()) return false;
+  const input = ensureFilePicker();
+  state.fileUploadContext = context;
+  input.dataset.context = context;
+  input.dataset.meetingId = state.selectedMeetingId || "";
+  input.accept = accept;
+  input.value = "";
+  input.click();
+  return true;
 }
 
 function nowTime() {
@@ -687,7 +746,8 @@ function normalizeMaterial(raw, index = 0) {
     contentType: raw.content_type || raw.contentType || raw.mime_type || raw.mimeType || raw.metadata?.content_type || "",
     size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || 0)),
     time: formatBackendDateTime(raw.time || raw.created_at || raw.createdAt || raw.updated_at, nowTime()),
-    version: raw.version || "V1.0"
+    version: raw.version || "V1.0",
+    status: raw.status || "stored"
   };
 }
 
@@ -711,11 +771,23 @@ function normalizeUploadedMaterialResponse(payload, index = 0) {
 
 function mergeMaterials(refreshedMaterials, uploadedMaterials) {
   const merged = [];
-  const seen = new Set();
+  const indexes = new Map();
   for (const material of [...uploadedMaterials, ...refreshedMaterials]) {
-    if (!material?.id || seen.has(material.id)) continue;
-    seen.add(material.id);
-    merged.push(material);
+    if (!material?.id) continue;
+    const existingIndex = indexes.get(material.id);
+    if (existingIndex === undefined) {
+      indexes.set(material.id, merged.length);
+      merged.push(material);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    merged[existingIndex] = {
+      ...existing,
+      ...material,
+      contentType: material.contentType || existing.contentType,
+      name: material.name || existing.name,
+      status: material.status || existing.status
+    };
   }
   return merged;
 }
@@ -940,11 +1012,7 @@ function getDemoPreviewState(deliverable = deliverables.find((item) => canonical
 }
 
 function stripAssistantReasoning(value) {
-  return String(value || "")
-    .replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "")
-    .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
-    .replace(/<\/?think\b[^>]*>/gi, "")
-    .trim();
+  return normalizeAssistantMarkdown(value);
 }
 
 function renderCollabMarkdown(value) {
@@ -952,12 +1020,7 @@ function renderCollabMarkdown(value) {
 }
 
 function normalizeCollabQuestions(payload) {
-  const pending = Array.isArray(payload?.pending) ? payload.pending : [];
-  return pending.map((item, index) => ({
-    id: item.qid || `collab-${index + 1}`,
-    time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
-    question: stripAssistantReasoning(item.question)
-  })).filter((item) => item.question);
+  return normalizeCollabQuestionPayload(payload);
 }
 
 function normalizeChatMessage(message) {
@@ -971,10 +1034,22 @@ function normalizeChatMessage(message) {
     time: source.created_at ? new Date(source.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : nowTime(),
     text: type === "answer" ? stripAssistantReasoning(rawText) : rawText,
     type,
+    role: source.role || (type === "answer" ? "assistant" : "user"),
     source: messageSource,
     materialId,
-    status: source.status || "sent"
+    materialStatus: source.material?.status || source.material_status || "",
+    status: source.status || "sent",
+    error: source.error || ""
   };
+}
+
+function applyMaterialProcessingStatuses(messages) {
+  const phases = resolveMaterialProcessingPhases(materials, messages);
+  for (const message of messages) {
+    if (message.type !== "material" || !message.materialId) continue;
+    message.status = phases.get(String(message.materialId)) || "uploaded";
+  }
+  return phases;
 }
 
 function normalizeChatHistoryResponse(payload) {
@@ -987,7 +1062,9 @@ function applyChatHistory(payload) {
   const pendingMaterialMessages = state.vpbuddyMessages.filter((message) => message.type === "material" && message.materialId);
   const localChatMessages = state.vpbuddyMessages.filter((message) => message.localOnly && ["sending", "failed"].includes(message.status));
   const mergedMessages = dedupeVpbuddyMessages([...messages, ...pendingMaterialMessages, ...localChatMessages]);
+  applyMaterialProcessingStatuses(mergedMessages);
   replaceArray(state.vpbuddyMessages, mergedMessages);
+  syncActiveMaterialProgress();
   state.showComposerHistory = mergedMessages.length > 0;
   return mergedMessages;
 }
@@ -1337,15 +1414,136 @@ function scheduleKnowledgeSearch() {
   }, 350);
 }
 
+function createEmptyPdfPreviewRuntime() {
+  return {
+    source: "",
+    blob: null,
+    loadingTask: null,
+    loadPromise: null,
+    document: null,
+    renderTask: null,
+    renderPromise: null,
+    canvas: null,
+    page: 0,
+    renderWidth: 0,
+    requestedPage: 0,
+    requestedWidth: 0
+  };
+}
+
+function resetPdfPreviewRuntime() {
+  const runtime = pdfPreviewRuntime;
+  runtime.renderTask?.cancel?.();
+  const cleanup = runtime.loadingTask?.destroy?.() || runtime.document?.destroy?.();
+  if (cleanup?.catch) cleanup.catch(() => {});
+  pdfPreviewRuntime = createEmptyPdfPreviewRuntime();
+}
+
+function loadPdfRendererModule() {
+  if (!pdfRendererModulePromise) {
+    const moduleUrl = new URL("../node_modules/pdfjs-dist/build/pdf.mjs", import.meta.url);
+    const workerUrl = new URL("../node_modules/pdfjs-dist/build/pdf.worker.mjs", import.meta.url);
+    pdfRendererModulePromise = import(moduleUrl.href).then((pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.href;
+      return pdfjs;
+    }).catch((error) => {
+      pdfRendererModulePromise = null;
+      throw error;
+    });
+  }
+  return pdfRendererModulePromise;
+}
+
+function loadHtml2CanvasModule() {
+  if (!html2canvasModulePromise) {
+    const moduleUrl = new URL("../node_modules/html2canvas/dist/html2canvas.esm.js", import.meta.url);
+    html2canvasModulePromise = import(moduleUrl.href).then((module) => module.default || module).catch((error) => {
+      html2canvasModulePromise = null;
+      throw error;
+    });
+  }
+  return html2canvasModulePromise;
+}
+
+async function ensurePdfPreviewMounted() {
+  const surface = document.querySelector(".material-pdf-preview[data-pdf-source]");
+  if (!surface || !presentationPreviewBlob || !state.presentationMime.includes("pdf")) return;
+  const source = surface.dataset.pdfSource;
+  const width = Math.max(1, Math.floor(surface.clientWidth));
+  const requestedPage = clamp(state.currentSlide, 1, Math.max(1, pdfPreviewRuntime.document?.numPages || 1));
+  const runtime = pdfPreviewRuntime;
+
+  if (runtime.source !== source) {
+    resetPdfPreviewRuntime();
+    pdfPreviewRuntime.source = source;
+    const previewBlob = presentationPreviewBlob;
+    pdfPreviewRuntime.blob = previewBlob;
+    try {
+      const pdfjs = await loadPdfRendererModule();
+      if (pdfPreviewRuntime.source !== source) return;
+      pdfPreviewRuntime.loadingTask = pdfjs.getDocument({ data: new Uint8Array(await previewBlob.arrayBuffer()) });
+      pdfPreviewRuntime.document = await pdfPreviewRuntime.loadingTask.promise;
+      if (pdfPreviewRuntime.source !== source) return;
+      state.presentationPdfPageCount = pdfPreviewRuntime.document.numPages;
+      state.currentSlide = clamp(state.currentSlide, 1, state.presentationPdfPageCount);
+      render();
+    } catch (error) {
+      if (pdfPreviewRuntime.source !== source) return;
+      state.presentationPdfError = materialPreviewErrorMessage(error);
+      state.presentationError = "PDF 无法在当前设备中渲染，请下载原文件查看。";
+      render();
+      return;
+    }
+  }
+
+  const activeRuntime = pdfPreviewRuntime;
+  const page = clamp(state.currentSlide, 1, activeRuntime.document?.numPages || 1);
+  if (!activeRuntime.document || (activeRuntime.page === page && activeRuntime.renderWidth === width)) return;
+  const canvas = surface.querySelector(".material-pdf-canvas");
+  if (!canvas) return;
+  activeRuntime.renderTask?.cancel?.();
+  try {
+    const pdfPage = await activeRuntime.document.getPage(page);
+    if (pdfPreviewRuntime !== activeRuntime || activeRuntime.source !== source) return;
+    const baseViewport = pdfPage.getViewport({ scale: 1 });
+    const scale = Math.max(0.5, width / baseViewport.width);
+    const viewport = pdfPage.getViewport({ scale });
+    const ratio = window.devicePixelRatio || 1;
+    const scrollTop = surface.scrollTop;
+    canvas.width = Math.ceil(viewport.width * ratio);
+    canvas.height = Math.ceil(viewport.height * ratio);
+    canvas.style.width = `${Math.ceil(viewport.width)}px`;
+    canvas.style.height = `${Math.ceil(viewport.height)}px`;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const renderTask = pdfPage.render({ canvasContext: context, viewport });
+    activeRuntime.renderTask = renderTask;
+    await renderTask.promise;
+    if (pdfPreviewRuntime !== activeRuntime || activeRuntime.source !== source) return;
+    activeRuntime.page = page;
+    activeRuntime.renderWidth = width;
+    surface.scrollTop = scrollTop;
+  } catch (error) {
+    if (error?.name !== "RenderingCancelledException") {
+      state.presentationPdfError = materialPreviewErrorMessage(error);
+    }
+  }
+}
+
 function clearPresentationPreview() {
   materialPreviewLoadSequence += 1;
+  resetPdfPreviewRuntime();
   if (state.presentationUrl.startsWith("blob:")) URL.revokeObjectURL(state.presentationUrl);
+  presentationPreviewBlob = null;
   state.presentationUrl = "";
   state.presentationMime = "";
   state.presentationName = "";
   state.presentationText = "";
   state.presentationLoading = false;
   state.presentationError = "";
+  state.presentationPdfPageCount = 0;
+  state.presentationPdfError = "";
+  state.currentSlide = 1;
 }
 
 function getMaterialPreviewCacheKeys(material, meetingId = state.selectedMeetingId, includeName = true) {
@@ -1433,6 +1631,12 @@ function preventActiveRecordingMeetingSwitch(nextMeetingId) {
   return true;
 }
 
+function areMeetingRecordsVisible() {
+  return state.stageTab === "deliverable"
+    ? state.deliverableLeftTab === "records"
+    : state.meetingLeftTab === "records";
+}
+
 function appendRealtimeTranscript(message, meetingId = state.selectedMeetingId) {
   if (!meetingId) return;
   const targetRecords = meetingId === state.selectedMeetingId
@@ -1452,7 +1656,7 @@ function appendRealtimeTranscript(message, meetingId = state.selectedMeetingId) 
   if (message.is_sentence_end) liveTranscriptIdsByMeeting.delete(meetingId);
   else liveTranscriptIdsByMeeting.set(meetingId, next.id);
   cacheTranscriptRecords(meetingId, targetRecords, { persist: Boolean(message.is_sentence_end) });
-  if (meetingId === state.selectedMeetingId && state.meetingLeftTab === "records") render();
+  if (meetingId === state.selectedMeetingId && areMeetingRecordsVisible()) render();
 }
 
 async function startRealtimeRecording() {
@@ -1601,6 +1805,8 @@ function startMeetingEvents(meetingId) {
         if (event.type === "chat-message") {
           const message = normalizeChatMessage(event.data || {});
           if (addVpbuddyMessage(message)) {
+            applyMaterialProcessingStatuses(state.vpbuddyMessages);
+            syncActiveMaterialProgress();
             state.showComposerHistory = true;
             render();
           }
@@ -1977,6 +2183,7 @@ async function startNewMeetingFromForm() {
     state.view = "meeting";
     state.stageTab = "presentation";
     state.meetingLeftTab = "records";
+    state.deliverableLeftTab = "deliverables";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== meeting.id;
     resetRecordingState();
     setApiStatus("connected", "新会议已由后端创建");
@@ -2212,6 +2419,7 @@ async function loadMaterialPreview(materialId) {
       state.presentationText = normalizeMaterialPreviewText(await previewBlob.text(), resolvedMime);
     } else if (resolvedMime) {
       const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
+      presentationPreviewBlob = previewBlob;
       state.presentationUrl = URL.createObjectURL(previewBlob);
     } else {
       state.presentationError = "当前格式暂不支持在线阅读，可下载原文件查看。";
@@ -2512,10 +2720,7 @@ function renderMeetingLoadingColumns() {
           <p>正在同步会议记录、材料和交付物</p>
         </div>
       </div>
-      <div class="panel meeting-loading-composer">
-        <span class="loading-row short"></span>
-        <span class="loading-row"></span>
-      </div>
+      ${renderVpbuddyComposer()}
     </section>
     <aside class="ai-panel panel meeting-loading-panel">
       <div class="loading-tab-row"><span></span></div>
@@ -2543,6 +2748,10 @@ function renderMeetingStage() {
         : paused
           ? "继续录制"
         : state.recordingStatus === "error" ? "重试录制" : "开始录制";
+  const recordingControlLabel = running ? recordingLabel : "已结束";
+  const recordingAriaLabel = running
+    ? `${recordingControlLabel}：${state.recordingMessage}`
+    : "会议已结束，无法录制";
   return `
     <main class="stage-screen">
       <header class="stage-topbar">
@@ -2564,8 +2773,18 @@ function renderMeetingStage() {
               <button class="stage-title-edit-action cancel" data-action="cancel-meeting-title" title="取消修改" aria-label="取消修改" ${state.meetingTitleSaving ? "disabled" : ""}>${icon("close", 17)}</button>
             </label>
           ` : `<h1 class="stage-meeting-title" data-role="meeting-title" title="双击修改会议名称">${escapeHtml(meeting?.title || "会议空间")}</h1>`}
-          <button class="recording ${recording ? "active" : ""} ${paused ? "paused" : ""} ${state.recordingStatus}" data-action="toggle-recording" title="${escapeHtml(state.recordingMessage)}" ${!running || recordingBusy || state.meetingDetailLoading ? "disabled" : ""}><i></i>${running ? recordingLabel : "已结束"}</button>
-          <span class="timer">${formatRecordingTime(state.recordingElapsed)}</span>
+          <button
+            class="recording ${recording ? "active" : ""} ${state.recordingStatus}"
+            data-action="toggle-recording"
+            data-recording-state="${state.recordingStatus}"
+            title="${escapeHtml(state.recordingMessage)}"
+            aria-label="${escapeHtml(recordingAriaLabel)}"
+            aria-pressed="${recording}"
+            aria-busy="${recordingBusy}"
+            aria-describedby="recording-timer"
+            ${!running || recordingBusy || state.meetingDetailLoading ? "disabled" : ""}
+          ><i aria-hidden="true"></i><span class="recording-label">${recordingControlLabel}</span></button>
+          <span class="timer" id="recording-timer" role="timer">${formatRecordingTime(state.recordingElapsed)}</span>
         </div>
         <div class="stage-actions">
           <button class="danger" data-action="end-meeting" ${state.endingMeeting || state.meetingDetailLoading ? "disabled" : ""}>${icon("power")}${state.endingMeeting ? "结束中" : "结束会议"}</button>
@@ -2619,10 +2838,31 @@ function startUploadProgress(context, name, total) {
     name,
     current: 0,
     total,
-    status: "uploading"
+    status: "uploading",
+    materialIds: [],
+    failureKind: ""
   };
   state.uploadProgress = progress;
   return progress;
+}
+
+function syncActiveMaterialProgress() {
+  const progress = state.uploadProgress;
+  if (!progress || progress.status !== "parsing" || !progress.materialIds.length) return;
+  const phase = aggregateMaterialProcessingPhase(materials, state.vpbuddyMessages, progress.materialIds);
+  if (phase === "uploaded") return;
+  progress.status = phase === "parsed" ? "complete" : "error";
+  progress.failureKind = phase === "parse-error" ? "parse" : "";
+}
+
+function scheduleCompletedUploadProgressClear(progress) {
+  if (progress.status !== "complete") return;
+  window.setTimeout(() => {
+    if (state.uploadProgress === progress && progress.status === "complete") {
+      state.uploadProgress = null;
+      render();
+    }
+  }, 1800);
 }
 
 function renderUploadProgress(context) {
@@ -2633,20 +2873,28 @@ function renderUploadProgress(context) {
   const isKnowledge = context === "knowledge";
   const isProminent = isSending || isKnowledge;
   const activeItem = Math.min(progress.total, progress.current + (progress.status === "uploading" ? 1 : 0));
+  const isParsing = progress.status === "parsing";
+  const isParseError = progress.status === "error" && progress.failureKind === "parse";
   const statusText = progress.status === "complete"
     ? `${progress.name} ${isSending ? "发送完成" : "上传完成"}`
     : progress.status === "error"
-      ? `${progress.name} ${isSending ? "发送失败" : "上传失败"}`
+      ? `${progress.name} ${isParseError ? "解析失败" : isSending ? "发送失败" : "上传失败"}`
+      : isParsing
+        ? `${progress.name} 上传成功，正在解析`
       : `${isSending ? "正在发送" : "正在上传"} ${progress.name}`;
   const progressTitle = progress.status === "complete"
     ? (isSending ? "材料发送完成" : "知识文档上传完成")
     : progress.status === "error"
-      ? (isSending ? "材料发送失败" : "知识文档上传失败")
+      ? (isParseError ? "材料解析失败" : isSending ? "材料发送失败" : "知识文档上传失败")
+      : isParsing
+        ? "上传成功，正在解析"
       : (isSending ? "正在发送材料" : "正在上传知识文档");
   const progressState = progress.status === "complete"
     ? "100%"
     : progress.status === "error"
       ? "失败"
+      : isParsing
+        ? "解析中"
       : (isSending ? "发送中" : "上传中");
   return `
     <div class="upload-progress ${isKnowledge ? "knowledge-upload-progress" : ""} ${isSending ? "vpbuddy-send-progress" : ""} ${progress.status} ${progress.status === "uploading" ? "indeterminate" : ""}" role="progressbar" aria-live="polite" aria-label="${escapeHtml(statusText)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
@@ -2666,6 +2914,7 @@ function renderUploadProgress(context) {
           <span>${progress.status === "uploading" ? `${isSending ? "正在发送" : "正在处理"}第 ${activeItem} 个${isSending ? "材料" : "文档"}` : escapeHtml(statusText)}</span>
           <span>${progress.current}/${progress.total} 已完成</span>
         </div>
+        ${progress.status === "error" ? `<button class="ghost compact" data-action="retry-upload" data-context="${escapeHtml(context)}">${isParseError ? "重新上传" : "重试"}</button>` : ""}
       ` : `<span>${escapeHtml(statusText)} · ${progress.current}/${progress.total}</span>`}
     </div>
   `;
@@ -2721,23 +2970,34 @@ function renderDeliverableDownloadMenu(current) {
 }
 
 function renderDeliverableListPanel() {
+  const tab = state.deliverableLeftTab === "records" ? "records" : "deliverables";
+  return `
+    <aside class="meeting-left panel" data-sidebar="deliverable">
+      <div class="panel-tabs" role="tablist" aria-label="交付物侧栏">
+        <button class="${tab === "records" ? "active" : ""}" data-action="deliverable-left-tab" data-tab="records" role="tab" aria-selected="${tab === "records"}">会议记录</button>
+        <button class="${tab === "deliverables" ? "active" : ""}" data-action="deliverable-left-tab" data-tab="deliverables" role="tab" aria-selected="${tab === "deliverables"}">交付物列表</button>
+      </div>
+      ${tab === "records" ? renderMeetingRecords() : renderDeliverableList()}
+    </aside>
+  `;
+}
+
+function renderDeliverableList() {
   const orderedDeliverables = getOrderedDeliverables();
   return `
-    <aside class="meeting-left panel">
-      <header class="deliverable-list-head">
-        <h2>交付物列表</h2>
-        <p>会中持续生成，可切换版本并回到会议证据。</p>
-      </header>
-      <div class="deliverable-stack">
-        ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
-          <button class="deliverable-row ${canonicalDeliverableKind(item.kind) === "demo" ? "is-demo" : ""} ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
-            ${docBadge(item.type)}
-            <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
-            ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
-          </button>
-        `).join("") : renderEmptyState("暂无交付物", "后端尚未生成本次会议的交付物。", "stack-empty")}
-      </div>
-    </aside>
+    <header class="deliverable-list-head">
+      <h2>交付物列表</h2>
+      <p>会中持续生成，可切换版本并回到会议证据。</p>
+    </header>
+    <div class="deliverable-stack">
+      ${orderedDeliverables.length ? orderedDeliverables.map((item) => `
+        <button class="deliverable-row ${canonicalDeliverableKind(item.kind) === "demo" ? "is-demo" : ""} ${state.selectedDeliverable === item.id ? "active" : ""}" data-action="select-deliverable" data-id="${escapeHtml(item.id)}">
+          ${docBadge(item.type)}
+          <span><strong>${escapeHtml(item.name)}</strong><em>${escapeHtml(item.status)} · ${escapeHtml(item.time)}</em></span>
+          ${canonicalDeliverableKind(item.kind) === "demo" ? `<small>${escapeHtml(getSelectedDemoVersion()?.label || item.version)}</small>` : ""}
+        </button>
+      `).join("") : renderEmptyState("暂无交付物", "后端尚未生成本次会议的交付物。", "stack-empty")}
+    </div>
   `;
 }
 
@@ -2858,7 +3118,15 @@ function renderMaterialPreviewContent(selectedMaterial) {
     return `<img src="${state.presentationUrl}" alt="${escapeHtml(materialName)}" />`;
   }
   if (state.presentationUrl && state.presentationMime.includes("pdf")) {
-    return `<iframe class="material-pdf-preview" src="${state.presentationUrl}#toolbar=1&navpanes=0&scrollbar=1&view=FitH" title="${escapeHtml(materialName)}"></iframe>`;
+    return `
+      <div
+        class="material-pdf-preview"
+        data-stable-stage-surface="material-preview"
+        data-stable-stage-source="${escapeHtml(state.presentationUrl)}"
+        data-pdf-source="${escapeHtml(state.presentationUrl)}"
+        aria-label="${escapeHtml(materialName)}"
+      ><canvas class="material-pdf-canvas"></canvas></div>
+    `;
   }
   if (isTextMaterialPreview(state.presentationMime)) {
     if (state.presentationMime === "text/markdown") {
@@ -2911,7 +3179,8 @@ function renderPresentationCanvas() {
         <button class="size-step" data-action="annotation-size" data-size="1">+</button>
       </div>
       <div class="tool-group">
-        <button title="撤销批注" data-action="annotation-undo">${icon("refresh")}</button>
+        <button title="撤销批注" aria-label="撤销批注" data-action="annotation-undo" ${state.annotationUndoStack.length ? "" : "disabled"}>${icon("undo")}</button>
+        <button title="重做批注" aria-label="重做批注" data-action="annotation-redo" ${state.annotationRedoStack.length ? "" : "disabled"}>${icon("redo")}</button>
         <button title="清空批注" data-action="annotation-clear">${icon("close")}</button>
       </div>
       <div class="tool-group slide-tools">
@@ -2922,7 +3191,7 @@ function renderPresentationCanvas() {
       <button class="fullscreen-corners" data-action="toggle-fullscreen" title="全屏展示" aria-label="全屏展示">⛶</button>
     </div>
     <div class="slide-frame annotation-canvas tool-${state.activeTool}">
-      <div class="stage-zoom-layer" style="--stage-zoom:${state.zoom / 100}">
+      <div class="stage-zoom-layer stage-render-surface" style="--stage-zoom:${state.zoom / 100}">
         ${renderMaterialPreviewContent(selectedMaterial)}
         <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
         <div class="annotation-text-layer">
@@ -3571,53 +3840,16 @@ function createAnnotationId() {
   return `ann-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function getAnnotationImageRect(visual = false) {
-  const canvas = document.querySelector(".annotation-canvas");
-  const image = canvas?.querySelector("img");
-  if (!canvas || !image) return null;
-  const frame = canvas.getBoundingClientRect();
-  const imageRatio = image.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : 16 / 9;
-  const frameRatio = frame.width / frame.height;
-  let width = frame.width;
-  let height = frame.height;
-  let left = frame.left;
-  let top = frame.top;
-  if (frameRatio > imageRatio) {
-    width = frame.height * imageRatio;
-    left = frame.left + (frame.width - width) / 2;
-  } else {
-    height = frame.width / imageRatio;
-    top = frame.top + (frame.height - height) / 2;
-  }
-  if (visual && state.zoom !== 100) {
-    const zoom = state.zoom / 100;
-    const centerX = frame.left + frame.width / 2;
-    const centerY = frame.top + frame.height / 2;
-    left = centerX + (left - centerX) * zoom;
-    top = centerY + (top - centerY) * zoom;
-    width *= zoom;
-    height *= zoom;
-  }
-  return { left, top, width, height, frameLeft: frame.left, frameTop: frame.top };
+function getAnnotationSurfaceRect() {
+  return document.querySelector(".stage-render-surface")?.getBoundingClientRect() || null;
 }
 
 function updateAnnotationViewport() {
-  const rect = getAnnotationImageRect();
-  const layer = document.querySelector(".annotation-layer");
-  const textLayer = document.querySelector(".annotation-text-layer");
-  if (!rect || !layer || !textLayer) return;
-  [layer, textLayer].forEach((element) => {
-    element.style.left = `${rect.left - rect.frameLeft}px`;
-    element.style.top = `${rect.top - rect.frameTop}px`;
-    element.style.right = "auto";
-    element.style.bottom = "auto";
-    element.style.width = `${rect.width}px`;
-    element.style.height = `${rect.height}px`;
-  });
+  void ensurePdfPreviewMounted();
 }
 
 function getCanvasPoint(event) {
-  const rect = getAnnotationImageRect(true);
+  const rect = getAnnotationSurfaceRect();
   if (!rect) return null;
   if (event.clientX < rect.left || event.clientX > rect.left + rect.width || event.clientY < rect.top || event.clientY > rect.top + rect.height) {
     return null;
@@ -3628,10 +3860,30 @@ function getCanvasPoint(event) {
   };
 }
 
+function cloneAnnotations(annotations = state.annotations) {
+  return structuredClone(annotations);
+}
+
+function saveAnnotationHistory() {
+  state.annotationUndoStack.push(cloneAnnotations());
+  if (state.annotationUndoStack.length > 100) state.annotationUndoStack.shift();
+  state.annotationRedoStack = [];
+}
+
+function restoreAnnotationHistory(from, to) {
+  const snapshot = from.pop();
+  if (!snapshot) return false;
+  to.push(cloneAnnotations());
+  state.annotations = snapshot;
+  state.textDraft = null;
+  return true;
+}
+
 function commitTextDraft() {
   if (!state.textDraft) return;
   const text = state.textDraft.value.trim();
   if (text) {
+    saveAnnotationHistory();
     state.annotations.push({
       id: createAnnotationId(),
       type: "text",
@@ -3645,6 +3897,7 @@ function commitTextDraft() {
 }
 
 function removeAnnotation(id) {
+  saveAnnotationHistory();
   state.annotations = state.annotations.filter((item) => item.id !== id);
 }
 
@@ -3712,31 +3965,39 @@ async function captureStageScreenshot() {
     render();
     return;
   }
-  const image = document.querySelector(".annotation-canvas img");
-  if (!image) {
-    setToast("暂无可截屏的投屏内容");
+  const stage = document.querySelector(".annotation-canvas");
+  const surface = document.querySelector(".stage-render-surface");
+  if (!stage || !surface) {
+    setToast("当前投屏区域尚未就绪，请稍后重试", false);
     render();
     return;
   }
-
-  if (!image.complete) {
-    await new Promise((resolve, reject) => {
-      image.addEventListener("load", resolve, { once: true });
-      image.addEventListener("error", reject, { once: true });
+  let blob = null;
+  try {
+    const html2canvas = await loadHtml2CanvasModule();
+    const captureCanvas = await html2canvas(stage, {
+      backgroundColor: "#061225",
+      scale: Math.min(2, window.devicePixelRatio || 1),
+      useCORS: true,
+      ignoreElements: (element) => element.matches?.(".stage-capture-button")
     });
-    if (meetingId !== state.selectedMeetingId) return;
+    blob = await canvasToPngBlob(captureCanvas);
+  } catch (error) {
+    const rect = stage.getBoundingClientRect();
+    const fallback = document.createElement("canvas");
+    fallback.width = Math.max(1, Math.round(rect.width));
+    fallback.height = Math.max(1, Math.round(rect.height));
+    const context = fallback.getContext("2d");
+    context.fillStyle = "#061225";
+    context.fillRect(0, 0, fallback.width, fallback.height);
+    const previewCanvas = surface.querySelector("canvas");
+    const image = surface.querySelector("img");
+    if (previewCanvas) context.drawImage(previewCanvas, 0, 0, fallback.width, fallback.height);
+    else if (image?.complete) context.drawImage(image, 0, 0, fallback.width, fallback.height);
+    drawStageAnnotations(context, fallback.width, fallback.height);
+    blob = await canvasToPngBlob(fallback);
+    recordClientLog("warn", "Stage screenshot used visual fallback", { message: error?.message || String(error) });
   }
-
-  const width = image.naturalWidth || 1600;
-  const height = image.naturalHeight || 900;
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(image, 0, 0, width, height);
-  drawStageAnnotations(ctx, width, height);
-
-  const blob = await canvasToPngBlob(canvas);
   if (meetingId !== state.selectedMeetingId) return;
   if (!blob) {
     setToast("截屏生成失败，请重试");
@@ -3776,6 +4037,9 @@ async function captureStageScreenshot() {
     });
     state.showComposerHistory = true;
     progress.current = 1;
+    progress.materialIds = [uploadedMaterial.id];
+    progress.status = "parsing";
+    syncActiveMaterialProgress();
     render();
 
     const refreshRevision = meetingMaterialsRevision;
@@ -3790,6 +4054,7 @@ async function captureStageScreenshot() {
     if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
       const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
       replaceArray(materials, mergeMaterials(refreshedMaterials, [uploadedMaterial]));
+      syncActiveMaterialProgress();
     } else if (materialList.status === "rejected") {
       recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: materialList.reason?.message || "unknown" });
     }
@@ -3805,7 +4070,6 @@ async function captureStageScreenshot() {
       : materials.at(-1)?.id || materials[0]?.id || "";
     state.meetingLeftTab = "materials";
     state.showComposerHistory = true;
-    progress.status = "complete";
     setToast(`截屏已上传为会议材料：${file.name}`);
   } catch (error) {
     if (meetingId !== state.selectedMeetingId) {
@@ -3814,15 +4078,11 @@ async function captureStageScreenshot() {
     }
     progress.current = 1;
     progress.status = "error";
+    progress.failureKind = "upload";
     setToast(`截屏上传失败：${error.message}`, false);
   }
   render();
-  window.setTimeout(() => {
-    if (state.uploadProgress === progress) {
-      state.uploadProgress = null;
-      render();
-    }
-  }, 1800);
+  scheduleCompletedUploadProgressClear(progress);
 }
 
 document.addEventListener("click", async (event) => {
@@ -3962,6 +4222,7 @@ document.addEventListener("click", async (event) => {
     state.stageFullscreen = false;
     document.body.classList.remove("stage-fullscreen-active");
     state.meetingLeftTab = "records";
+    state.deliverableLeftTab = "deliverables";
     state.view = "meeting";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
     render();
@@ -4009,9 +4270,15 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "stage-tab") {
     state.stageTab = target.dataset.tab;
-    if (state.stageTab === "deliverable") state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    if (state.stageTab === "deliverable") {
+      state.deliverableLeftTab = "deliverables";
+      state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    }
   }
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
+  if (action === "deliverable-left-tab") {
+    state.deliverableLeftTab = target.dataset.tab === "records" ? "records" : "deliverables";
+  }
   if (action === "knowledge-select") state.selectedKnowledge = target.dataset.id;
   if (action === "toggle-knowledge-callable") {
     const doc = knowledgeDocs.find((item) => item.id === target.dataset.id) || getSelectedKnowledgeDoc();
@@ -4029,15 +4296,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "open-upload") {
-    if (isUploadInProgress()) return;
-    state.fileUploadContext = target.dataset.context || "material";
-    const input = document.querySelector(".native-file-input");
-    if (input) {
-      input.accept = state.fileUploadContext === "knowledge"
+    const context = target.dataset.context || "material";
+    openFilePicker(
+      context,
+      context === "knowledge"
         ? ".txt,.md,.pdf"
-        : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg";
-      input.click();
-    }
+        : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+    );
     return;
   }
   if (action === "capture-screenshot") {
@@ -4098,13 +4363,21 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "send-vpbuddy-material") {
-    if (isUploadInProgress()) return;
-    state.fileUploadContext = "vpbuddy-material";
-    const input = document.querySelector(".native-file-input");
-    if (input) {
-      input.accept = ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp";
-      input.click();
-    }
+    openFilePicker("vpbuddy-material", ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp");
+    return;
+  }
+  if (action === "retry-upload") {
+    const context = target.dataset.context || state.uploadProgress?.context || "vpbuddy-material";
+    state.uploadProgress = null;
+    render();
+    openFilePicker(
+      context,
+      context === "knowledge"
+        ? ".txt,.md,.pdf"
+        : context === "vpbuddy-material"
+          ? ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp"
+          : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+    );
     return;
   }
   if (action === "refresh-collab") {
@@ -4136,10 +4409,13 @@ document.addEventListener("click", async (event) => {
   if (action === "annotation-color") state.annotationColor = target.dataset.color;
   if (action === "annotation-size") state.penSize = clamp(state.penSize + Number(target.dataset.size), 2, 10);
   if (action === "annotation-undo") {
-    state.annotations.pop();
-    setToast("已撤销上一处批注");
+    if (restoreAnnotationHistory(state.annotationUndoStack, state.annotationRedoStack)) setToast("已撤销上一处批注");
+  }
+  if (action === "annotation-redo") {
+    if (restoreAnnotationHistory(state.annotationRedoStack, state.annotationUndoStack)) setToast("已重做批注");
   }
   if (action === "annotation-clear") {
+    if (state.annotations.length) saveAnnotationHistory();
     state.annotations = [];
     state.textDraft = null;
     setToast("已清空当前页批注");
@@ -4157,8 +4433,11 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-slide") state.currentSlide = Number(target.dataset.slide);
   if (action === "slide-step") {
-    state.currentSlide = 1;
-    setToast("当前材料暂不支持翻页", false);
+    if (state.presentationMime.includes("pdf") && state.presentationPdfPageCount) {
+      state.currentSlide = clamp(state.currentSlide + Number(target.dataset.step), 1, state.presentationPdfPageCount);
+    } else {
+      setToast("当前材料暂不支持翻页", false);
+    }
   }
   if (action === "concept-search") {
     state.modal = "concept-search";
@@ -4245,8 +4524,12 @@ document.addEventListener("change", async (event) => {
     return;
   }
   const meetingId = state.selectedMeetingId;
+  if (event.target.dataset.meetingId && event.target.dataset.meetingId !== meetingId) {
+    event.target.value = "";
+    return;
+  }
   const names = files.map((file) => file.name).join("、");
-  const context = state.fileUploadContext;
+  const context = event.target.dataset.context || state.fileUploadContext;
   const progressContext = context;
   if (!meetingId) {
     setToast(context === "knowledge"
@@ -4297,6 +4580,13 @@ document.addEventListener("change", async (event) => {
           });
           state.showComposerHistory = true;
         }
+        progress.materialIds.push(uploadedMaterial.id);
+        progress.current = index + 1;
+        if (progress.current === progress.total) {
+          progress.status = "parsing";
+          syncActiveMaterialProgress();
+        }
+        render();
       } else {
         await api.uploadKnowledgeDocument(file, {
           meetingId,
@@ -4344,6 +4634,7 @@ document.addEventListener("change", async (event) => {
     if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
       const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
       replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
+      syncActiveMaterialProgress();
     } else {
       if (materialList.status === "rejected") {
         recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: materialList.reason?.message || "unknown" });
@@ -4371,6 +4662,7 @@ document.addEventListener("change", async (event) => {
       if (meetingMaterialsRevision === refreshRevision) {
         const refreshedMaterials = normalizeMaterialsResponse(payload);
         replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
+        syncActiveMaterialProgress();
       }
       state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
     } catch (error) {
@@ -4382,18 +4674,21 @@ document.addEventListener("change", async (event) => {
       recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: error.message });
     }
   }
-  progress.status = errors.length ? "error" : "complete";
+  if (errors.length) {
+    progress.status = "error";
+    progress.failureKind = "upload";
+  } else if (context === "knowledge") {
+    progress.status = "complete";
+  } else if (succeeded) {
+    progress.status = "parsing";
+    syncActiveMaterialProgress();
+  }
   setToast(errors.length
     ? `${succeeded}/${files.length} 个文件${context === "vpbuddy-material" ? "发送" : "上传"}成功；${errors[0]}`
     : `${names} ${context === "vpbuddy-material" ? "发送" : "上传"}成功`, false);
   event.target.value = "";
   render();
-  window.setTimeout(() => {
-    if (state.uploadProgress === progress) {
-      state.uploadProgress = null;
-      render();
-    }
-  }, 1800);
+  scheduleCompletedUploadProgressClear(progress);
 });
 
 document.addEventListener("keydown", (event) => {
@@ -4472,6 +4767,7 @@ document.addEventListener("pointerdown", (event) => {
   }
 
   const id = createAnnotationId();
+  saveAnnotationHistory();
   if (state.activeTool === "pen") {
     state.annotations.push({
       id,

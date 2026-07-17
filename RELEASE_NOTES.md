@@ -1,5 +1,40 @@
 # VPBuddy Releases
 
+## v0.1.3 · 2026-07-17
+
+### Windows
+
+- [Windows 安装版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.3/VPBuddy-Setup-0.1.3-x64.exe)：标准安装程序，可创建桌面和开始菜单快捷方式。
+- [Windows 便携版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.3/VPBuddy-Portable-0.1.3-x64.exe)：无需安装，直接运行。
+
+### macOS
+
+- [Apple Silicon 版（arm64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.3/VPBuddy-0.1.3-mac-arm64.dmg)：适用于 Apple M 系列芯片。
+- [Intel 版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.3/VPBuddy-0.1.3-mac-x64.dmg)：适用于 Intel 芯片 Mac。
+
+### 主要更新
+
+- PDF 投屏改用稳定的 PDF.js 画布渲染，保留当前页与滚动位置，避免后台刷新导致内容反复闪烁或回到开头。
+- 图片、PDF 和其他可预览材料共享统一投屏画布；画笔、文字和图形批注不再依赖底层材料格式。
+- 截屏操作捕获完整投屏画布，包含当前材料画面与批注，并沿用会议材料上传和 VPBuddy 发送流程。
+- 发送材料使用稳定的文件选择入口，支持重复选择同一文件，并区分上传中、已上传待解析、解析完成和解析失败状态。
+- 材料上传成功后立即进入会议资料和对话记录，后端解析结果随后异步更新，不再让用户等待完整解析才看到上传成功。
+- 交付物页左侧新增“会议记录”和“交付物列表”切换，查看交付物时仍可随时核对真实会议转录。
+- AI 协同列表与详情统一解析后端 Markdown，兼容 `content`、`text`、`question` 和 `suggestion` 等真实返回字段。
+- 开始录制按钮保持原位置和尺寸，同时增强默认、录制中、暂停、请求中及错误状态的视觉反馈。
+- 桌面客户端增加窗口加载兜底显示逻辑，修复安装包启动后进程存在但窗口未出现的问题。
+
+### 数据与接口边界
+
+- 会议材料、聊天、AI 协同和交付物仍使用现有后端接口，不新增业务 mock 数据。
+- 当前后端没有独立的材料解析进度或解析重试接口；客户端依据材料状态、聊天消息和实时事件展示解析阶段，失败后的重试仍通过重新上传执行。
+
+### 校验
+
+- JavaScript 语法检查通过，全部 Node 自动化测试通过。
+- Windows 解包客户端完成实际构建和窗口启动烟雾测试。
+- GitHub Actions 根据 `v0.1.3` tag 构建，并在发布前严格校验版本号和 4 个公开资产。
+
 ## v0.1.2 · 2026-07-17
 
 ### Windows

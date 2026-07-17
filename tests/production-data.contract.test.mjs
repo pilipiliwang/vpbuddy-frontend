@@ -275,7 +275,7 @@ test("AI follow-up content sits directly below the AI collaboration heading", ()
 test("AI collaboration cards and details safely render Markdown without reasoning tags", () => {
   const aiPanelSource = sourceBetween(mainSource, "function renderAIPanel()", "function renderTimeline()");
   const modalSource = sourceBetween(mainSource, 'if (state.modal === "followup-detail")', 'if (state.modal === "all-explanations")');
-  assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,700}?stripAssistantReasoning\(item\.question/, "collaboration DTOs must remove model reasoning before display");
+  assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,160}?normalizeCollabQuestionPayload\(payload\)/, "collaboration DTOs must pass through the shared content normalizer");
   assertSourceIncludes(mainSource, /function\s+renderCollabMarkdown\s*\(value\)[\s\S]{0,160}?renderMarkdown\(stripAssistantReasoning\(value\)\)/, "collaboration content must pass through the safe Markdown renderer");
   assertSourceIncludes(aiPanelSource, /renderCollabMarkdown\(item\.question\)/, "AI collaboration cards must use the collaboration Markdown boundary");
   assertSourceIncludes(aiPanelSource, /class=["']followup-markdown markdown-content["']/, "AI collaboration cards must expose structured Markdown styling");
@@ -334,7 +334,7 @@ test("stage screenshots are persisted as meeting materials", () => {
   const captureEnd = mainSource.indexOf('document.addEventListener("click"', captureStart);
   const captureSource = mainSource.slice(captureStart, captureEnd);
   assert.notEqual(captureStart, -1, "the stage screenshot handler must exist");
-  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
+  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,4000}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
   assertSourceIncludes(captureSource, /api\.listMaterials\(meetingId\)/, "the pinned meeting material list must refresh after screenshot upload");
   assertSourceIncludes(captureSource, /startUploadProgress\(\s*["']vpbuddy-material["']\s*,\s*file\.name\s*,\s*1\s*\)/, "screenshot upload must use the same prominent VPBuddy material progress contract as manual sending");
   assertSourceExcludes(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be sent only as a chat attachment");

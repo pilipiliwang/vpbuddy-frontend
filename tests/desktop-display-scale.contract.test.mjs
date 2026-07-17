@@ -138,3 +138,12 @@ test("Electron main applies and diagnoses zoom without changing browser CSS", ()
   assert.doesNotMatch(mainSource, /force-device-scale-factor/);
   assert.doesNotMatch(mainSource, /style\.transform|document\.documentElement\.style\.zoom/);
 });
+
+test("packaged startup cannot leave the main window permanently hidden", () => {
+  assert.match(mainSource, /const WINDOW_REVEAL_TIMEOUT_MS = 3000/);
+  assert.match(mainSource, /win\.once\("ready-to-show", \(\) => reveal\("ready-to-show"\)\)/);
+  assert.match(mainSource, /win\.webContents\.once\("did-finish-load", \(\) => reveal\("did-finish-load"\)\)/);
+  assert.match(mainSource, /setTimeout\(\(\) => reveal\("timeout"\), WINDOW_REVEAL_TIMEOUT_MS\)/);
+  assert.match(mainSource, /if \(!win\.isVisible\(\)\) win\.show\(\)/);
+  assert.match(mainSource, /revealMainWindow\("load-error"\)/);
+});

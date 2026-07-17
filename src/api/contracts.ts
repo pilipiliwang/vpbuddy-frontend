@@ -278,7 +278,10 @@ export interface ChatHistoryResponse {
 export interface CollaborationQuestion {
   qid: ID;
   section: string;
-  question: string;
+  content?: string;
+  text?: string;
+  question?: string;
+  suggestion?: string;
   asked_by: string;
   asked_at: ISODateTime;
   answered_by?: string;
