@@ -65,17 +65,27 @@ test("manual material uploads retain their original Blob for immediate presentat
   assert.match(uploadSource, /api\.uploadMaterial\(meetingId,\s*file\)[\s\S]*?cacheMaterialPreviewDownload\(uploadedMaterial,\s*\{[\s\S]*?blob:\s*file,[\s\S]*?filename:\s*file\.name,[\s\S]*?contentType:\s*file\.type[\s\S]*?\},\s*meetingId,\s*true\)/);
 });
 
-test("presentation supports a scrollable PDF reader and local text formats", () => {
+test("presentation uses a stable canvas PDF reader and supports local text formats", () => {
   const loadSource = sourceBetween(mainSource, "async function loadMaterialPreview", "async function presentMaterial");
   const renderSource = sourceBetween(mainSource, "function renderMaterialPreviewContent", "function renderPresentationCanvas");
 
   assert.match(mainSource, /md:\s*"text\/markdown"/);
   assert.match(mainSource, /csv:\s*"text\/csv"/);
   assert.match(loadSource, /isTextMaterialPreview\(resolvedMime\)[\s\S]*?await previewBlob\.text\(\)/);
-  assert.match(renderSource, /class="material-pdf-preview"[\s\S]*?#toolbar=1&navpanes=0&scrollbar=1&view=FitH/);
+  assert.match(renderSource, /class="material-pdf-preview"[\s\S]*?data-stable-stage-surface="material-preview"[\s\S]*?material-pdf-canvas/);
+  assert.match(mainSource, /async function ensurePdfPreviewMounted[\s\S]*?pdfjs\.getDocument[\s\S]*?surface\.scrollTop\s*=\s*scrollTop/);
   assert.match(renderSource, /class="material-text-preview markdown-body"[\s\S]*?renderMarkdown\(state\.presentationText\)/);
   assert.match(stylesSource, /\.material-text-preview\s*\{[\s\S]*?overflow:\s*auto/);
+  assert.match(stylesSource, /\.material-pdf-preview\s*\{[\s\S]*?overflow:\s*auto/);
   assert.match(stylesSource, /\.annotation-canvas\.tool-cursor \.annotation-layer\s*\{[\s\S]*?pointer-events:\s*none/);
+});
+
+test("ordinary renders preserve the material surface while PDF rendering is mounted separately", () => {
+  const patchSource = sourceBetween(mainSource, "function patchDomNode", "function patchDomChildren");
+  const updateSource = sourceBetween(mainSource, "function updateAppMarkup", "function render()");
+
+  assert.match(patchSource, /stableStageSurface[\s\S]*?stableStageSource[\s\S]*?syncDomAttributes\(current,\s*next\);[\s\S]*?return/);
+  assert.match(updateSource, /canPreserveStageSurface[\s\S]*?patchDomChildren\(app,\s*template\.content\)/);
 });
 
 test("network-level preview failures are actionable and retryable", () => {
@@ -91,7 +101,7 @@ test("fullscreen rendering patches the active element instead of replacing it", 
   const toolbarSource = sourceBetween(mainSource, "function renderPresentationCanvas", "function renderDeliverableCanvas");
 
   assert.match(updateSource, /document\.fullscreenElement\s*&&\s*app\.contains\(document\.fullscreenElement\)/);
-  assert.match(updateSource, /canPreserveFrame\s*\|\|\s*preserveFullscreenElement\)\s*patchDomChildren\(app,\s*template\.content\)/);
+  assert.match(updateSource, /canPreserveFrame\s*\|\|\s*preserveFullscreenElement\s*\|\|\s*canPreserveStageSurface\)\s*patchDomChildren\(app,\s*template\.content\)/);
   assert.match(updateSource, /else\s+app\.innerHTML\s*=\s*nextMarkup/);
   for (const action of ["tool", "annotation-color", "annotation-size", "annotation-undo", "annotation-clear", "zoom"]) {
     assert.match(toolbarSource, new RegExp(`data-action=["']${action}["']`), `missing fullscreen-safe toolbar action: ${action}`);
