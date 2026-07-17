@@ -516,6 +516,15 @@ textarea::placeholder {
   font-size: 22px;
 }
 
+.login-card .field:focus-within {
+  border-color: rgba(91, 171, 255, 0.96);
+  box-shadow: 0 0 0 3px rgba(55, 151, 255, 0.3);
+}
+
+.login-card .field input:focus-visible {
+  outline: none;
+}
+
 .login-card .icon {
   color: #8b98bc;
   width: 30px;
