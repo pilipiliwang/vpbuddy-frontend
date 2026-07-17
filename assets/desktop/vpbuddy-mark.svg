@@ -1,21 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="VPBuddy">
   <defs>
-    <linearGradient id="left" x1="190" y1="160" x2="560" y2="850" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#20c8ff"/>
-      <stop offset="0.52" stop-color="#1765ff"/>
-      <stop offset="1" stop-color="#6b2cff"/>
+    <radialGradient id="background" cx="50%" cy="52%" r="72%">
+      <stop offset="0" stop-color="#0e285a"/>
+      <stop offset="0.58" stop-color="#091e46"/>
+      <stop offset="1" stop-color="#061839"/>
+    </radialGradient>
+    <linearGradient id="cyan" x1="320" y1="300" x2="417" y2="724" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#26caff"/>
+      <stop offset="0.56" stop-color="#2780ff"/>
+      <stop offset="0.82" stop-color="#454bff"/>
+      <stop offset="1" stop-color="#6b3fff"/>
     </linearGradient>
-    <linearGradient id="right" x1="820" y1="170" x2="500" y2="840" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#8a2bff"/>
-      <stop offset="0.52" stop-color="#5a28ff"/>
-      <stop offset="1" stop-color="#245dff"/>
-    </linearGradient>
-    <linearGradient id="fold" x1="430" y1="690" x2="650" y2="840" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#234eff"/>
-      <stop offset="1" stop-color="#8b20ef"/>
+    <linearGradient id="violet" x1="704" y1="300" x2="607" y2="724" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b3fff"/>
+      <stop offset="0.55" stop-color="#7350ff"/>
+      <stop offset="0.82" stop-color="#3d67ff"/>
+      <stop offset="1" stop-color="#13c4ff"/>
     </linearGradient>
   </defs>
-  <path fill="url(#left)" d="M163 170c-18 0-30 18-23 35l245 578c8 19 26 31 47 31h151L322 194c-6-15-20-24-36-24H163z"/>
-  <path fill="url(#right)" d="M703 170c-16 0-30 9-36 24L487 619l101 239c8 19 35 19 43 0l253-653c7-17-6-35-24-35H703z"/>
-  <path fill="url(#fold)" d="M385 783l41 96c7 17 24 28 43 28h117c18 0 35-11 42-28l28-72-69-163-56 132c-6 14-20 23-35 23h-77c-12 0-24-6-34-16z"/>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <line x1="704" y1="300" x2="607" y2="724" stroke="url(#violet)" stroke-width="200" stroke-linecap="round"/>
+  <line x1="320" y1="300" x2="417" y2="724" stroke="url(#cyan)" stroke-width="200" stroke-linecap="round"/>
 </svg>

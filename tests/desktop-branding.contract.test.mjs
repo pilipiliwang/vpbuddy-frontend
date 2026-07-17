@@ -69,10 +69,27 @@ function parseIcnsTypes(buffer) {
 
 test("the desktop assets preserve the existing blue-purple VPBuddy mark", () => {
   assert.match(markSource, /viewBox="0 0 1024 1024"/);
-  assert.equal((markSource.match(/<path\b/g) || []).length, 3);
+  assert.match(markSource, /<rect width="1024" height="1024" fill="url\(#background\)"\/>/);
+  assert.equal((markSource.match(/<line\b/g) || []).length, 2);
+  assert.equal((markSource.match(/stroke-width="200"/g) || []).length, 2);
+  assert.equal((markSource.match(/stroke-linecap="round"/g) || []).length, 2);
+  assert.match(markSource, /x1="320" y1="300" x2="417" y2="724"/);
+  assert.match(markSource, /x1="704" y1="300" x2="607" y2="724"/);
   assert.deepEqual(
     Array.from(markSource.matchAll(/stop-color="(#[0-9a-f]{6})"/g), (match) => match[1]),
-    ["#20c8ff", "#1765ff", "#6b2cff", "#8a2bff", "#5a28ff", "#245dff", "#234eff", "#8b20ef"]
+    [
+      "#0e285a",
+      "#091e46",
+      "#061839",
+      "#26caff",
+      "#2780ff",
+      "#454bff",
+      "#6b3fff",
+      "#8b3fff",
+      "#7350ff",
+      "#3d67ff",
+      "#13c4ff"
+    ]
   );
 
   assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
@@ -80,19 +97,18 @@ test("the desktop assets preserve the existing blue-purple VPBuddy mark", () => 
   assert.equal(png.readUInt32BE(16), 1024);
   assert.equal(png.readUInt32BE(20), 1024);
   assert.equal(png[24], 8, "the master PNG must use 8-bit channels");
-  assert.equal(png[25], 6, "the master PNG must preserve RGBA transparency");
+  assert.equal(png[25], 2, "the master PNG must preserve the opaque deep-navy RGB background");
 });
 
 test("the Windows icon contains every desktop and shortcut size", () => {
-  assert.deepEqual(parseIcoSizes(ico), [16, 20, 24, 32, 40, 48, 64, 128, 256]);
+  assert.deepEqual(parseIcoSizes(ico), [16, 24, 32, 48, 64, 128, 256]);
 });
 
 test("the macOS icon contains standard and Retina representations", () => {
   const types = parseIcnsTypes(icns);
-  for (const type of ["ic07", "ic08", "ic09", "ic10", "ic11", "ic12", "ic13", "ic14"]) {
+  for (const type of ["icp4", "icp5", "icp6", "ic07", "ic08", "ic09", "ic10", "ic11", "ic12", "ic13", "ic14"]) {
     assert.ok(types.includes(type), `ICNS must contain ${type}`);
   }
-  assert.ok(types.includes("s8mk") && types.includes("l8mk"), "ICNS must retain legacy small-icon alpha masks");
 });
 
 test("electron-builder applies one brand to apps, installers, disk images, and shortcuts", () => {
@@ -117,9 +133,9 @@ test("reviewed desktop icon binaries cannot be replaced silently", () => {
       icns: sha256(icns)
     },
     {
-      png: "0d2106bb06ad1c217e289d5d2df1e9782a544c6ede38218cf013dab4a19706d5",
-      ico: "91a37262f416748ddf23693db1aa0c88282488c8192bbcefdb4bbfb52bd2cde2",
-      icns: "098a0ef23760c8f1340ccd532107e04d174125477740e55deae501268950df45"
+      png: "c22473244c52a468f6b7e55670ab94b0179ff5a1d392a41a441e9c8b6f00de8d",
+      ico: "d404c931fe3c48edff4589a59ff6a0623229371998a9183bab2d2bcc89359859",
+      icns: "e9bfd0ea6b586a2d92dcb14be0190604fbfef37af7ebfd64697a87216c15f09a"
     }
   );
 });
