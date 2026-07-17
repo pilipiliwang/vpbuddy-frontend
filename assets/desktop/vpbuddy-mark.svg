@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="VPBuddy">
+  <defs>
+    <radialGradient id="background" cx="50%" cy="52%" r="72%">
+      <stop offset="0" stop-color="#0e285a"/>
+      <stop offset="0.58" stop-color="#091e46"/>
+      <stop offset="1" stop-color="#061839"/>
+    </radialGradient>
+    <linearGradient id="cyan" x1="320" y1="300" x2="417" y2="724" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#26caff"/>
+      <stop offset="0.56" stop-color="#2780ff"/>
+      <stop offset="0.82" stop-color="#454bff"/>
+      <stop offset="1" stop-color="#6b3fff"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="704" y1="300" x2="607" y2="724" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b3fff"/>
+      <stop offset="0.55" stop-color="#7350ff"/>
+      <stop offset="0.82" stop-color="#3d67ff"/>
+      <stop offset="1" stop-color="#13c4ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <line x1="704" y1="300" x2="607" y2="724" stroke="url(#violet)" stroke-width="200" stroke-linecap="round"/>
+  <line x1="320" y1="300" x2="417" y2="724" stroke="url(#cyan)" stroke-width="200" stroke-linecap="round"/>
+</svg>

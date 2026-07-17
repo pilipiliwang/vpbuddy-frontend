@@ -1,7 +1,8 @@
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, screen, shell } = require("electron");
 const { createReadStream, existsSync, statSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { extname, join, normalize, resolve, sep } = require("node:path");
+const { calculateDesktopZoom, calculateWindowGeometry } = require("./display-scale.cjs");
 
 const appRoot = resolve(__dirname, "..");
 let staticServer = null;
@@ -98,13 +99,216 @@ function startStaticServer() {
   });
 }
 
+function activeDisplayForWindow(win) {
+  try {
+    return screen.getDisplayMatching(win.getBounds());
+  } catch {
+    return screen.getPrimaryDisplay();
+  }
+}
+
+function rendererDisplayMetrics(win) {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve(null);
+
+  return win.webContents.executeJavaScript(`(() => ({
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    devicePixelRatio: window.devicePixelRatio,
+    screen: {
+      width: window.screen.width,
+      height: window.screen.height,
+      availWidth: window.screen.availWidth,
+      availHeight: window.screen.availHeight
+    }
+  }))()`, true).catch(() => null);
+}
+
+function closestTo(value, alternatives) {
+  return alternatives.reduce((closest, candidate) => (
+    Math.abs(candidate - value) < Math.abs(closest - value) ? candidate : closest
+  ));
+}
+
+function baselineRendererMetrics(contentSize, rendererMetrics, currentZoom, displayScaleFactor) {
+  const nativeWidth = Number(contentSize[0]);
+  const nativeHeight = Number(contentSize[1]);
+  const rendererWidth = Number(rendererMetrics?.viewport?.width) * currentZoom;
+  const rendererHeight = Number(rendererMetrics?.viewport?.height) * currentZoom;
+
+  const chooseViewportDimension = (rendererValue, nativeValue) => {
+    if (!Number.isFinite(rendererValue) || rendererValue <= 0) return nativeValue;
+    const ratio = rendererValue / nativeValue;
+    return ratio >= 0.9 && ratio <= 1.1 ? rendererValue : nativeValue;
+  };
+
+  const rawDevicePixelRatio = Number(rendererMetrics?.devicePixelRatio);
+  const displayScale = Number.isFinite(displayScaleFactor) && displayScaleFactor > 0
+    ? displayScaleFactor
+    : 1;
+  const devicePixelRatio = Number.isFinite(rawDevicePixelRatio) && rawDevicePixelRatio > 0
+    ? closestTo(displayScale, [rawDevicePixelRatio, rawDevicePixelRatio / currentZoom])
+    : displayScale;
+
+  return {
+    viewportWidth: chooseViewportDimension(rendererWidth, nativeWidth),
+    viewportHeight: chooseViewportDimension(rendererHeight, nativeHeight),
+    devicePixelRatio
+  };
+}
+
+function constrainWindowToDisplay(win, display) {
+  if (!display) return;
+
+  const geometry = calculateWindowGeometry(display);
+  win.setMinimumSize(geometry.minWidth, geometry.minHeight);
+  if (win.isMaximized() || win.isFullScreen()) return;
+
+  const workArea = display.workArea || {
+    x: 0,
+    y: 0,
+    width: display.workAreaSize?.width,
+    height: display.workAreaSize?.height
+  };
+  if (!Number.isFinite(workArea.width) || !Number.isFinite(workArea.height)) return;
+
+  const bounds = win.getBounds();
+  const width = bounds.width > workArea.width
+    ? Math.min(bounds.width, Math.floor(workArea.width * 0.96))
+    : bounds.width;
+  const height = bounds.height > workArea.height
+    ? Math.min(bounds.height, Math.floor(workArea.height * 0.96))
+    : bounds.height;
+  const x = Math.min(Math.max(bounds.x, workArea.x), workArea.x + workArea.width - width);
+  const y = Math.min(Math.max(bounds.y, workArea.y), workArea.y + workArea.height - height);
+  const nextBounds = { x, y, width, height };
+
+  if (Object.keys(nextBounds).some((key) => nextBounds[key] !== bounds[key])) {
+    win.setBounds(nextBounds);
+  }
+}
+
+async function applyDesktopDisplayScale(win, reason, diagnosticState) {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+
+  const revision = ++diagnosticState.revision;
+  const display = activeDisplayForWindow(win);
+  constrainWindowToDisplay(win, display);
+  const currentZoom = win.webContents.getZoomFactor();
+  const contentSize = win.getContentSize();
+  const rendererMetrics = await rendererDisplayMetrics(win);
+  if (revision !== diagnosticState.revision || win.isDestroyed()) return;
+
+  const baseline = baselineRendererMetrics(
+    contentSize,
+    rendererMetrics,
+    currentZoom,
+    display?.scaleFactor
+  );
+  const zoom = calculateDesktopZoom({
+    viewportWidth: baseline.viewportWidth,
+    viewportHeight: baseline.viewportHeight,
+    displayScaleFactor: display?.scaleFactor || baseline.devicePixelRatio,
+    platform: process.platform,
+    zoomOverride: process.env.VPBUDDY_DESKTOP_ZOOM_FACTOR
+  });
+
+  if (Math.abs(currentZoom - zoom.zoomFactor) > 0.001) {
+    win.webContents.setZoomFactor(zoom.zoomFactor);
+  }
+
+  const diagnostics = {
+    reason,
+    platform: process.platform,
+    display: {
+      id: display?.id,
+      label: display?.label || "",
+      bounds: display?.bounds,
+      workArea: display?.workArea,
+      scaleFactor: display?.scaleFactor || baseline.devicePixelRatio,
+      systemScalePercent: Math.round((display?.scaleFactor || baseline.devicePixelRatio) * 100)
+    },
+    window: {
+      bounds: win.getBounds(),
+      contentSize: { width: contentSize[0], height: contentSize[1] }
+    },
+    renderer: {
+      ...rendererMetrics,
+      baselineDevicePixelRatio: Math.round(baseline.devicePixelRatio * 1000) / 1000,
+      viewportAtZoomFactorOne: {
+        width: Math.round(baseline.viewportWidth),
+        height: Math.round(baseline.viewportHeight)
+      }
+    },
+    zoom
+  };
+
+  if (zoom.override.status === "invalid" && !diagnosticState.warnedInvalidOverride) {
+    diagnosticState.warnedInvalidOverride = true;
+    console.warn(
+      `[VPBuddy display-scale] Ignoring invalid VPBUDDY_DESKTOP_ZOOM_FACTOR=${JSON.stringify(zoom.override.raw)}`
+    );
+  }
+
+  const signature = JSON.stringify({
+    displayId: diagnostics.display.id,
+    displayScaleFactor: diagnostics.display.scaleFactor,
+    contentSize: diagnostics.window.contentSize,
+    zoomFactor: zoom.zoomFactor,
+    source: zoom.source
+  });
+  if (signature !== diagnosticState.lastSignature || process.env.VPBUDDY_DESKTOP_SCALE_DEBUG === "1") {
+    diagnosticState.lastSignature = signature;
+    console.info(`[VPBuddy display-scale] ${JSON.stringify(diagnostics)}`);
+  }
+
+  win.webContents.executeJavaScript(
+    `window.VPBUDDY_DESKTOP_DISPLAY_SCALE = ${JSON.stringify(diagnostics)};`,
+    true
+  ).catch(() => {});
+}
+
+function installDesktopDisplayScale(win) {
+  const diagnosticState = {
+    lastSignature: "",
+    revision: 0,
+    timer: null,
+    warnedInvalidOverride: false
+  };
+
+  const schedule = (reason, delay = 120) => {
+    if (diagnosticState.timer) clearTimeout(diagnosticState.timer);
+    diagnosticState.timer = setTimeout(() => {
+      diagnosticState.timer = null;
+      applyDesktopDisplayScale(win, reason, diagnosticState).catch((error) => {
+        console.warn(`[VPBuddy display-scale] ${error?.message || String(error)}`);
+      });
+    }, delay);
+  };
+
+  const onDisplayMetricsChanged = (_event, changedDisplay) => {
+    if (changedDisplay?.id === activeDisplayForWindow(win)?.id) {
+      schedule("display-metrics-changed");
+    }
+  };
+
+  win.webContents.on("did-finish-load", () => schedule("did-finish-load", 0));
+  win.on("resize", () => schedule("resize"));
+  win.on("move", () => schedule("move"));
+  screen.on("display-metrics-changed", onDisplayMetricsChanged);
+
+  win.once("closed", () => {
+    diagnosticState.revision += 1;
+    if (diagnosticState.timer) clearTimeout(diagnosticState.timer);
+    screen.removeListener("display-metrics-changed", onDisplayMetricsChanged);
+  });
+}
+
 function createMainWindow(url) {
+  const display = screen.getPrimaryDisplay();
+  const windowGeometry = calculateWindowGeometry(display);
   const win = new BrowserWindow({
     title: "VPBuddy",
-    width: 1440,
-    height: 900,
-    minWidth: 1180,
-    minHeight: 720,
+    ...windowGeometry,
+    center: true,
     backgroundColor: "#020b1a",
     autoHideMenuBar: true,
     show: false,
@@ -114,6 +318,17 @@ function createMainWindow(url) {
       sandbox: true
     }
   });
+
+  const [contentWidth, contentHeight] = win.getContentSize();
+  const initialZoom = calculateDesktopZoom({
+    viewportWidth: contentWidth,
+    viewportHeight: contentHeight,
+    displayScaleFactor: display.scaleFactor,
+    platform: process.platform,
+    zoomOverride: process.env.VPBUDDY_DESKTOP_ZOOM_FACTOR
+  });
+  win.webContents.setZoomFactor(initialZoom.zoomFactor);
+  installDesktopDisplayScale(win);
 
   win.once("ready-to-show", () => {
     win.show();

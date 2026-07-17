@@ -1,6 +1,6 @@
 {
   "name": "vpbuddy-frontend",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "VPBuddy desktop shell and frontend",
   "type": "module",
@@ -41,6 +41,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "identity": null,
+      "icon": "assets/desktop/vpbuddy-icon.icns",
       "target": [
         {
           "target": "dmg",
@@ -59,7 +60,11 @@
       ],
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
+    "dmg": {
+      "icon": "assets/desktop/vpbuddy-icon.icns"
+    },
     "win": {
+      "icon": "assets/desktop/vpbuddy-icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -77,6 +82,8 @@
     },
     "nsis": {
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "installerIcon": "assets/desktop/vpbuddy-icon.ico",
+      "uninstallerIcon": "assets/desktop/vpbuddy-icon.ico",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
