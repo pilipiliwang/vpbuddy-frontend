@@ -1,4 +1,4 @@
-import { copyFile, readFile, readdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,26 +11,19 @@ export const LATEST_RELEASE_URL = `${RELEASE_REPOSITORY_URL}/releases/latest`;
 
 const assetDefinitions = Object.freeze({
   windows: Object.freeze([
-    Object.freeze({
-      versionedName: (version) => `VPBuddy-Setup-${version}-x64.exe`,
-      stableName: "VPBuddy-Setup-latest-x64.exe"
-    }),
-    Object.freeze({
-      versionedName: (version) => `VPBuddy-Portable-${version}-x64.exe`,
-      stableName: "VPBuddy-Portable-latest-x64.exe"
-    })
+    (version) => `VPBuddy-Setup-${version}-x64.exe`,
+    (version) => `VPBuddy-Portable-${version}-x64.exe`
   ]),
-  macos: Object.freeze(
-    ["arm64", "x64"].flatMap((arch) =>
-      ["dmg", "zip"].map((extension) =>
-        Object.freeze({
-          versionedName: (version) => `VPBuddy-${version}-mac-${arch}.${extension}`,
-          stableName: `VPBuddy-latest-mac-${arch}.${extension}`
-        })
-      )
-    )
-  )
+  macos: Object.freeze([
+    (version) => `VPBuddy-${version}-mac-arm64.dmg`,
+    (version) => `VPBuddy-${version}-mac-x64.dmg`
+  ])
 });
+
+export const PUBLIC_RELEASE_ASSET_COUNT = Object.values(assetDefinitions).reduce(
+  (count, definitions) => count + definitions.length,
+  0
+);
 
 function assertVersion(version) {
   if (!semverPattern.test(version)) {
@@ -44,17 +37,22 @@ function assertPlatform(platform) {
   }
 }
 
-export function getReleaseAssetPairs(platform, version) {
+export function getReleaseAssetNames(platform, version) {
   assertPlatform(platform);
   assertVersion(version);
-  return assetDefinitions[platform].map(({ versionedName, stableName }) => ({
-    versionedName: versionedName(version),
-    stableName
-  }));
+  return assetDefinitions[platform].map((buildName) => buildName(version));
 }
 
-export function getAllReleaseAssetPairs(version) {
-  return Object.keys(assetDefinitions).flatMap((platform) => getReleaseAssetPairs(platform, version));
+export function getAllReleaseAssetNames(version) {
+  return Object.keys(assetDefinitions).flatMap((platform) => getReleaseAssetNames(platform, version));
+}
+
+export function getReleaseAssetUrl(version, assetName) {
+  assertVersion(version);
+  if (!getAllReleaseAssetNames(version).includes(assetName)) {
+    throw new Error(`Unsupported public release asset: ${assetName}`);
+  }
+  return `${RELEASE_REPOSITORY_URL}/releases/download/v${version}/${assetName}`;
 }
 
 export function assertReleaseTag(tag, version) {
@@ -70,21 +68,54 @@ export async function readPackageVersion(packagePath = path.join(repositoryRoot,
   return packageJson.version;
 }
 
-export async function prepareReleaseAliases({ platform, releaseDirectory, version }) {
-  const resolvedVersion = version ?? (await readPackageVersion());
-  const pairs = getReleaseAssetPairs(platform, resolvedVersion);
-
-  for (const pair of pairs) {
-    const source = path.join(releaseDirectory, pair.versionedName);
-    const destination = path.join(releaseDirectory, pair.stableName);
-    const sourceStat = await stat(source);
-    if (!sourceStat.isFile() || sourceStat.size === 0) {
-      throw new Error(`Versioned release asset is empty or missing: ${source}`);
-    }
-    await copyFile(source, destination);
+async function assertNonEmptyFile(file, label) {
+  let fileStat;
+  try {
+    fileStat = await stat(file);
+  } catch {
+    throw new Error(`${label} is missing: ${file}`);
   }
 
-  return pairs;
+  if (!fileStat.isFile() || fileStat.size === 0) {
+    throw new Error(`${label} is empty or not a file: ${file}`);
+  }
+}
+
+export async function prepareReleaseAssets({
+  platform,
+  releaseDirectory,
+  outputDirectory,
+  version
+}) {
+  const resolvedVersion = version ?? (await readPackageVersion());
+  const resolvedReleaseDirectory = path.resolve(releaseDirectory);
+  const resolvedOutputDirectory = path.resolve(
+    outputDirectory ?? path.join(resolvedReleaseDirectory, "publish")
+  );
+  const assetNames = getReleaseAssetNames(platform, resolvedVersion);
+
+  if (resolvedOutputDirectory === resolvedReleaseDirectory) {
+    throw new Error("Public asset output directory must differ from the builder output directory.");
+  }
+
+  for (const assetName of assetNames) {
+    await assertNonEmptyFile(
+      path.join(resolvedReleaseDirectory, assetName),
+      "Versioned release asset"
+    );
+  }
+
+  await rm(resolvedOutputDirectory, { recursive: true, force: true });
+  await mkdir(resolvedOutputDirectory, { recursive: true });
+
+  for (const assetName of assetNames) {
+    await copyFile(
+      path.join(resolvedReleaseDirectory, assetName),
+      path.join(resolvedOutputDirectory, assetName)
+    );
+  }
+
+  return { assetNames, outputDirectory: resolvedOutputDirectory };
 }
 
 async function listFilesRecursively(directory) {
@@ -100,37 +131,56 @@ async function listFilesRecursively(directory) {
 
 export async function verifyReleaseAssets({ rootDirectory, version }) {
   const resolvedVersion = version ?? (await readPackageVersion());
+  const expectedNames = getAllReleaseAssetNames(resolvedVersion).toSorted();
   const files = await listFilesRecursively(rootDirectory);
-  const filesByName = new Map(files.map((file) => [path.basename(file), file]));
+  const actualNames = files.map((file) => path.basename(file));
+  const counts = new Map();
 
-  for (const pair of getAllReleaseAssetPairs(resolvedVersion)) {
-    const versionedPath = filesByName.get(pair.versionedName);
-    const stablePath = filesByName.get(pair.stableName);
-    if (!versionedPath || !stablePath) {
-      throw new Error(`Release asset pair is incomplete: ${pair.versionedName} / ${pair.stableName}`);
-    }
-
-    const [versionedStat, stableStat] = await Promise.all([stat(versionedPath), stat(stablePath)]);
-    if (versionedStat.size === 0 || versionedStat.size !== stableStat.size) {
-      throw new Error(`Release asset alias does not match its versioned source: ${pair.stableName}`);
-    }
+  for (const assetName of actualNames) {
+    counts.set(assetName, (counts.get(assetName) ?? 0) + 1);
   }
+
+  const missing = expectedNames.filter((assetName) => !counts.has(assetName));
+  const unexpected = [...new Set(actualNames.filter((assetName) => !expectedNames.includes(assetName)))].toSorted();
+  const duplicates = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([assetName]) => assetName)
+    .toSorted();
+
+  if (missing.length || unexpected.length || duplicates.length) {
+    const details = [
+      missing.length ? `missing: ${missing.join(", ")}` : "",
+      unexpected.length ? `unexpected: ${unexpected.join(", ")}` : "",
+      duplicates.length ? `duplicated: ${duplicates.join(", ")}` : ""
+    ].filter(Boolean);
+    throw new Error(`Public release assets must be exactly the four approved files (${details.join("; ")}).`);
+  }
+
+  for (const file of files) {
+    await assertNonEmptyFile(file, "Public release asset");
+  }
+
+  return expectedNames;
 }
 
 async function main([command, target, directory]) {
   if (command === "prepare") {
     const releaseDirectory = path.resolve(repositoryRoot, directory ?? "release");
-    const pairs = await prepareReleaseAliases({ platform: target, releaseDirectory });
-    for (const pair of pairs) {
-      console.log(`${pair.versionedName} -> ${pair.stableName}`);
+    const prepared = await prepareReleaseAssets({ platform: target, releaseDirectory });
+    for (const assetName of prepared.assetNames) {
+      console.log(`${assetName} -> ${path.join(prepared.outputDirectory, assetName)}`);
     }
     return;
   }
 
   if (command === "verify") {
     const rootDirectory = path.resolve(repositoryRoot, target ?? "artifacts");
-    await verifyReleaseAssets({ rootDirectory });
-    console.log("Release assets verified.");
+    const version = await readPackageVersion();
+    if (process.env.GITHUB_REF_TYPE === "tag") {
+      assertReleaseTag(process.env.GITHUB_REF_NAME, version);
+    }
+    await verifyReleaseAssets({ rootDirectory, version });
+    console.log(`Release assets verified: ${PUBLIC_RELEASE_ASSET_COUNT} approved files.`);
     return;
   }
 

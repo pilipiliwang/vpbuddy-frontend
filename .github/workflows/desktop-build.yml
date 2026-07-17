@@ -51,17 +51,14 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm run desktop:build:win
-      - run: npm run release:aliases:windows
+      - name: Build public Windows packages
+        run: npx --no-install electron-builder --win nsis portable --x64 --publish never --config.nsis.differentialPackage=false
+      - name: Stage public Windows assets
+        run: node scripts/release-assets.mjs prepare windows release
       - uses: actions/upload-artifact@v4
         with:
           name: vpbuddy-windows
-          path: |
-            release/VPBuddy-Setup-*.exe
-            release/VPBuddy-Portable-*.exe
-            release/VPBuddy-Setup-latest-x64.exe
-            release/VPBuddy-Portable-latest-x64.exe
-            release/*.blockmap
+          path: release/publish/*
           if-no-files-found: error
 
   macos:
@@ -79,19 +76,14 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm run desktop:build:mac
-      - run: npm run release:aliases:macos
+      - name: Build public macOS packages
+        run: npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false
+      - name: Stage public macOS assets
+        run: node scripts/release-assets.mjs prepare macos release
       - uses: actions/upload-artifact@v4
         with:
           name: vpbuddy-macos
-          path: |
-            release/VPBuddy-*.dmg
-            release/VPBuddy-*.zip
-            release/VPBuddy-latest-mac-arm64.dmg
-            release/VPBuddy-latest-mac-x64.dmg
-            release/VPBuddy-latest-mac-arm64.zip
-            release/VPBuddy-latest-mac-x64.zip
-            release/*.blockmap
+          path: release/publish/*
           if-no-files-found: error
 
   release:
@@ -110,11 +102,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Verify versioned and stable release assets
+      - name: Verify public release assets
         run: npm run release:verify
-      - name: Compose release title
+      - name: Compose release metadata
         shell: bash
-        run: echo "RELEASE_NAME=VPBuddy ${GITHUB_REF_NAME} · $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8')" >> "$GITHUB_ENV"
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          RELEASE_DATE="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
+          echo "APP_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=VPBuddy v${VERSION} · ${RELEASE_DATE}" >> "$GITHUB_ENV"
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.RELEASE_NAME }}
@@ -123,7 +119,7 @@ jobs:
           make_latest: true
           fail_on_unmatched_files: true
           files: |
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-            artifacts/**/*.zip
-            artifacts/**/*.blockmap
+            artifacts/vpbuddy-windows/VPBuddy-Setup-${{ env.APP_VERSION }}-x64.exe
+            artifacts/vpbuddy-windows/VPBuddy-Portable-${{ env.APP_VERSION }}-x64.exe
+            artifacts/vpbuddy-macos/VPBuddy-${{ env.APP_VERSION }}-mac-arm64.dmg
+            artifacts/vpbuddy-macos/VPBuddy-${{ env.APP_VERSION }}-mac-x64.dmg

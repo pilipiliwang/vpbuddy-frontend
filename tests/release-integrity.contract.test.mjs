@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import {
   LATEST_RELEASE_URL,
+  PUBLIC_RELEASE_ASSET_COUNT,
   assertReleaseTag,
-  getAllReleaseAssetPairs,
-  getReleaseAssetPairs,
-  prepareReleaseAliases,
+  getAllReleaseAssetNames,
+  getReleaseAssetNames,
+  getReleaseAssetUrl,
+  prepareReleaseAssets,
   verifyReleaseAssets
 } from "../scripts/release-assets.mjs";
 
@@ -19,19 +21,22 @@ const readRepositoryFile = (file) => readFile(path.join(repositoryRoot, file), "
 
 const packageJson = JSON.parse(await readRepositoryFile("package.json"));
 const packageLock = JSON.parse(await readRepositoryFile("package-lock.json"));
+const desktopMain = await readRepositoryFile("desktop/main.cjs");
 const readme = await readRepositoryFile("README.md");
 const releaseNotes = await readRepositoryFile("RELEASE_NOTES.md");
 const workflowSource = await readRepositoryFile(".github/workflows/desktop-build.yml");
 const workflow = yaml.load(workflowSource);
 
-const expectedStableAssets = [
-  "VPBuddy-Setup-latest-x64.exe",
-  "VPBuddy-Portable-latest-x64.exe",
-  "VPBuddy-latest-mac-arm64.dmg",
-  "VPBuddy-latest-mac-arm64.zip",
-  "VPBuddy-latest-mac-x64.dmg",
-  "VPBuddy-latest-mac-x64.zip"
+const expectedReleaseAssets = [
+  `VPBuddy-Setup-${packageJson.version}-x64.exe`,
+  `VPBuddy-Portable-${packageJson.version}-x64.exe`,
+  `VPBuddy-${packageJson.version}-mac-arm64.dmg`,
+  `VPBuddy-${packageJson.version}-mac-x64.dmg`
 ];
+const windowsBuildCommand = "npx --no-install electron-builder --win nsis portable --x64 --publish never --config.nsis.differentialPackage=false";
+const macosBuildCommand = "npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false";
+const windowsStageCommand = "node scripts/release-assets.mjs prepare windows release";
+const macosStageCommand = "node scripts/release-assets.mjs prepare macos release";
 
 function stepRuns(job, command) {
   return job.steps.some((step) => step.run === command);
@@ -41,18 +46,24 @@ function actionStep(job, action) {
   return job.steps.find((step) => step.uses === action);
 }
 
+function namedStep(job, name) {
+  return job.steps.find((step) => step.name === name);
+}
+
 function needs(job) {
   return Array.isArray(job.needs) ? job.needs : [job.needs];
 }
 
 test("package, lockfile, README, release notes, and tag share one version", () => {
   const version = packageJson.version;
+  const escapedVersion = version.replaceAll(".", "\\.");
   assert.match(version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   assert.equal(packageLock.version, version);
   assert.equal(packageLock.packages[""].version, version);
   assert.ok(readme.includes(`当前代码版本：\`v${version}\``));
-  assert.match(readme, new RegExp(`^## v${version.replaceAll(".", "\\.")} 更新摘要$`, "m"));
-  assert.match(releaseNotes, new RegExp(`^# VPBuddy v${version.replaceAll(".", "\\.")}$`, "m"));
+  assert.match(readme, new RegExp(`^## v${escapedVersion} 更新摘要$`, "m"));
+  assert.match(releaseNotes, /^# VPBuddy Releases$/m);
+  assert.match(releaseNotes, new RegExp(`^## v${escapedVersion} · \\d{4}-\\d{2}-\\d{2}$`, "m"));
   assert.ok(releaseNotes.includes(`\`v${version}\` tag`));
 
   assert.doesNotThrow(() => assertReleaseTag(`v${version}`, version));
@@ -63,9 +74,21 @@ test("package, lockfile, README, release notes, and tag share one version", () =
   }
 });
 
-test("electron-builder names every Windows and macOS asset with the package version", () => {
-  assert.equal(packageJson.scripts["desktop:build:win"], "electron-builder --win nsis portable --x64 --publish never");
-  assert.equal(packageJson.scripts["desktop:build:mac"], "electron-builder --mac dmg zip --x64 --arm64 --publish never");
+test("the desktop has no automatic updater dependency or runtime integration", () => {
+  const directDependencies = {
+    ...packageJson.dependencies,
+    ...packageJson.devDependencies,
+    ...packageJson.optionalDependencies
+  };
+  assert.equal(directDependencies["electron-updater"], undefined);
+  assert.equal(directDependencies["update-electron-app"], undefined);
+  assert.equal(packageJson.build.publish, undefined);
+  assert.doesNotMatch(desktopMain, /\bautoUpdater\b|checkForUpdates|setFeedURL|latest(?:-mac)?\.ya?ml|\.blockmap/);
+  assert.match(packageJson.scripts["desktop:build:win"], /--publish never$/);
+  assert.match(packageJson.scripts["desktop:build:mac"], /--publish never$/);
+});
+
+test("electron-builder names the four public installers with the package version", () => {
   assert.equal(packageJson.build.nsis.artifactName, "${productName}-Setup-${version}-${arch}.${ext}");
   assert.equal(packageJson.build.portable.artifactName, "${productName}-Portable-${version}-${arch}.${ext}");
   assert.equal(packageJson.build.mac.artifactName, "${productName}-${version}-mac-${arch}.${ext}");
@@ -74,55 +97,100 @@ test("electron-builder names every Windows and macOS asset with the package vers
   assert.deepEqual(windowsTargets, { nsis: ["x64"], portable: ["x64"] });
 
   const macTargets = Object.fromEntries(packageJson.build.mac.target.map((target) => [target.target, target.arch]));
-  assert.deepEqual(macTargets, { dmg: ["x64", "arm64"], zip: ["x64", "arm64"] });
-
-  assert.deepEqual(
-    getAllReleaseAssetPairs(packageJson.version).map((asset) => asset.stableName).sort(),
-    expectedStableAssets.toSorted()
-  );
+  assert.deepEqual(macTargets.dmg, ["x64", "arm64"]);
+  assert.equal(PUBLIC_RELEASE_ASSET_COUNT, 4);
+  assert.deepEqual(getAllReleaseAssetNames(packageJson.version), expectedReleaseAssets);
 });
 
-test("README uses the stable latest release page and never predicts a versioned release URL", () => {
+test("README and release notes link only the four versioned user downloads", () => {
   assert.ok(readme.includes(`](${LATEST_RELEASE_URL})`));
-  assert.doesNotMatch(readme, /github\.com\/pilipiliwang\/vpbuddy-frontend\/releases\/(?:download|tag)\/v\d/);
 
-  for (const stableAsset of expectedStableAssets.filter((asset) => !asset.endsWith(".zip"))) {
-    assert.ok(readme.includes(`\`${stableAsset}\``));
+  for (const assetName of expectedReleaseAssets) {
+    const downloadUrl = getReleaseAssetUrl(packageJson.version, assetName);
+    assert.ok(readme.includes(`](${downloadUrl})`));
+    assert.ok(releaseNotes.includes(`](${downloadUrl})`));
   }
+
+  for (const document of [readme, releaseNotes]) {
+    assert.doesNotMatch(
+      document,
+      /releases\/download\/[^)]+\/(?:[^)\s]*latest[^)\s]*|[^)\s]*\.blockmap|VPBuddy-[^)\s]*-mac-(?:arm64|x64)\.zip)/
+    );
+  }
+
+  const versionHeading = releaseNotes.indexOf(`## v${packageJson.version} · `);
+  const windowsHeading = releaseNotes.indexOf("### Windows", versionHeading);
+  const macosHeading = releaseNotes.indexOf("### macOS", windowsHeading);
+  const nextVersionHeading = releaseNotes.indexOf("\n## v", versionHeading + 1);
+  const versionSectionEnd = nextVersionHeading === -1 ? releaseNotes.length : nextVersionHeading;
+  assert.ok(versionHeading >= 0 && windowsHeading > versionHeading);
+  assert.ok(macosHeading > windowsHeading && macosHeading < versionSectionEnd);
 });
 
-test("alias preparation preserves versioned artifacts and creates byte-identical stable assets", async () => {
+test("asset staging publishes exactly four files and ignores builder byproducts", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "vpbuddy-release-contract-"));
+  const windowsBuild = path.join(temporaryDirectory, "windows-build");
+  const macosBuild = path.join(temporaryDirectory, "macos-build");
+  const artifacts = path.join(temporaryDirectory, "artifacts");
+  const windowsPublic = path.join(artifacts, "vpbuddy-windows");
+  const macosPublic = path.join(artifacts, "vpbuddy-macos");
+
   try {
-    for (const pair of getAllReleaseAssetPairs(packageJson.version)) {
-      await writeFile(path.join(temporaryDirectory, pair.versionedName), `fixture:${pair.versionedName}`);
+    await Promise.all([mkdir(windowsBuild, { recursive: true }), mkdir(macosBuild, { recursive: true })]);
+    for (const assetName of getReleaseAssetNames("windows", packageJson.version)) {
+      await writeFile(path.join(windowsBuild, assetName), `fixture:${assetName}`);
+    }
+    for (const assetName of getReleaseAssetNames("macos", packageJson.version)) {
+      await writeFile(path.join(macosBuild, assetName), `fixture:${assetName}`);
     }
 
-    await prepareReleaseAliases({
+    await writeFile(path.join(windowsBuild, "VPBuddy-Setup-latest-x64.exe"), "forbidden alias");
+    await writeFile(path.join(windowsBuild, `VPBuddy-Setup-${packageJson.version}-x64.exe.blockmap`), "byproduct");
+    await writeFile(path.join(macosBuild, `VPBuddy-${packageJson.version}-mac-arm64.zip`), "duplicate package");
+    await writeFile(path.join(macosBuild, `VPBuddy-${packageJson.version}-mac-arm64.dmg.blockmap`), "byproduct");
+
+    await prepareReleaseAssets({
       platform: "windows",
-      releaseDirectory: temporaryDirectory,
+      releaseDirectory: windowsBuild,
+      outputDirectory: windowsPublic,
       version: packageJson.version
     });
-    await prepareReleaseAliases({
+    await prepareReleaseAssets({
       platform: "macos",
-      releaseDirectory: temporaryDirectory,
+      releaseDirectory: macosBuild,
+      outputDirectory: macosPublic,
       version: packageJson.version
     });
-    await verifyReleaseAssets({ rootDirectory: temporaryDirectory, version: packageJson.version });
 
-    for (const pair of getAllReleaseAssetPairs(packageJson.version)) {
-      const [versioned, stable] = await Promise.all([
-        readFile(path.join(temporaryDirectory, pair.versionedName)),
-        readFile(path.join(temporaryDirectory, pair.stableName))
-      ]);
-      assert.deepEqual(stable, versioned);
-    }
+    assert.deepEqual(
+      (await readdir(windowsPublic)).toSorted(),
+      getReleaseAssetNames("windows", packageJson.version).toSorted()
+    );
+    assert.deepEqual(
+      (await readdir(macosPublic)).toSorted(),
+      getReleaseAssetNames("macos", packageJson.version).toSorted()
+    );
+    await assert.doesNotReject(() => verifyReleaseAssets({ rootDirectory: artifacts, version: packageJson.version }));
+
+    const forbiddenAsset = path.join(macosPublic, `VPBuddy-${packageJson.version}-mac-x64.zip`);
+    await writeFile(forbiddenAsset, "unexpected public file");
+    await assert.rejects(
+      () => verifyReleaseAssets({ rootDirectory: artifacts, version: packageJson.version }),
+      /unexpected: .*\.zip/
+    );
+    await rm(forbiddenAsset);
+
+    await writeFile(path.join(windowsPublic, expectedReleaseAssets[0]), "");
+    await assert.rejects(
+      () => verifyReleaseAssets({ rootDirectory: artifacts, version: packageJson.version }),
+      /Public release asset is empty/
+    );
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
 
-test("desktop workflow gates both builders and the latest GitHub Release on the contract", () => {
+test("desktop workflow gates and publishes the exact public asset allowlist", () => {
   assert.deepEqual(workflow.on.push.tags, ["v*"]);
   for (const contractPath of [
     "README.md",
@@ -141,38 +209,35 @@ test("desktop workflow gates both builders and the latest GitHub Release on the 
   assert.ok(stepRuns(contract, "npm ci --ignore-scripts"));
   assert.ok(stepRuns(contract, "npm run test:release-contract"));
   assert.equal(packageJson.scripts["test:release-contract"], "node --test tests/release-integrity.contract.test.mjs");
-  assert.equal(packageJson.scripts["release:aliases:windows"], "node scripts/release-assets.mjs prepare windows release");
-  assert.equal(packageJson.scripts["release:aliases:macos"], "node scripts/release-assets.mjs prepare macos release");
   assert.equal(packageJson.scripts["release:verify"], "node scripts/release-assets.mjs verify artifacts");
   assert.deepEqual(needs(windows), ["contract"]);
   assert.deepEqual(needs(macos), ["contract"]);
   assert.deepEqual(needs(release).toSorted(), ["contract", "macos", "windows"]);
   assert.equal(release.if, "startsWith(github.ref, 'refs/tags/v')");
 
-  assert.ok(stepRuns(windows, "npm run desktop:build:win"));
-  assert.ok(stepRuns(macos, "npm run desktop:build:mac"));
-  assert.ok(stepRuns(windows, "npm run release:aliases:windows"));
-  assert.ok(stepRuns(macos, "npm run release:aliases:macos"));
+  assert.ok(stepRuns(windows, windowsBuildCommand));
+  assert.ok(stepRuns(macos, macosBuildCommand));
+  assert.ok(stepRuns(windows, windowsStageCommand));
+  assert.ok(stepRuns(macos, macosStageCommand));
   assert.ok(stepRuns(release, "npm run release:verify"));
+  assert.equal(actionStep(windows, "actions/upload-artifact@v4").with.path, "release/publish/*");
+  assert.equal(actionStep(macos, "actions/upload-artifact@v4").with.path, "release/publish/*");
 
-  const windowsUploadPaths = actionStep(windows, "actions/upload-artifact@v4").with.path;
-  const macosUploadPaths = actionStep(macos, "actions/upload-artifact@v4").with.path;
-  for (const pair of getReleaseAssetPairs("windows", packageJson.version)) {
-    assert.match(windowsUploadPaths, new RegExp(pair.stableName.replaceAll(".", "\\.")));
-  }
-  for (const pair of getReleaseAssetPairs("macos", packageJson.version)) {
-    assert.match(macosUploadPaths, new RegExp(pair.stableName.replaceAll(".", "\\.")));
-  }
-  assert.match(windowsUploadPaths, /VPBuddy-Setup-\*\.exe/);
-  assert.match(windowsUploadPaths, /VPBuddy-Portable-\*\.exe/);
-  assert.match(macosUploadPaths, /VPBuddy-\*\.dmg/);
-  assert.match(macosUploadPaths, /VPBuddy-\*\.zip/);
+  const releaseMetadata = namedStep(release, "Compose release metadata");
+  assert.match(releaseMetadata.run, /TZ=Asia\/Shanghai date '\+%Y-%m-%d'/);
+  assert.match(releaseMetadata.run, /RELEASE_NAME=VPBuddy v\$\{VERSION\} · \$\{RELEASE_DATE\}/);
 
   const githubRelease = actionStep(release, "softprops/action-gh-release@v2");
+  assert.equal(githubRelease.with.name, "${{ env.RELEASE_NAME }}");
   assert.equal(githubRelease.with.tag_name, "${{ github.ref_name }}");
+  assert.equal(githubRelease.with.body_path, "RELEASE_NOTES.md");
   assert.equal(githubRelease.with.make_latest, true);
   assert.equal(githubRelease.with.fail_on_unmatched_files, true);
-  for (const extension of ["exe", "dmg", "zip"]) {
-    assert.match(githubRelease.with.files, new RegExp(`artifacts/\\*\\*/\\*\\.${extension}`));
-  }
+  assert.deepEqual(githubRelease.with.files.trim().split(/\r?\n/), [
+    "artifacts/vpbuddy-windows/VPBuddy-Setup-${{ env.APP_VERSION }}-x64.exe",
+    "artifacts/vpbuddy-windows/VPBuddy-Portable-${{ env.APP_VERSION }}-x64.exe",
+    "artifacts/vpbuddy-macos/VPBuddy-${{ env.APP_VERSION }}-mac-arm64.dmg",
+    "artifacts/vpbuddy-macos/VPBuddy-${{ env.APP_VERSION }}-mac-x64.dmg"
+  ]);
+  assert.doesNotMatch(githubRelease.with.files, /latest|\.blockmap|\.zip|\*\*\/\*/);
 });

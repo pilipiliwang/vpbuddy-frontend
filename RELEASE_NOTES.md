@@ -1,8 +1,18 @@
-# VPBuddy v0.1.1
+# VPBuddy Releases
 
-更新时间：2026-07-17 01:37 (UTC+8)
+## v0.1.1 · 2026-07-17
 
-## 主要更新
+### Windows
+
+- [Windows 安装版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.1/VPBuddy-Setup-0.1.1-x64.exe)：标准安装程序，可创建桌面和开始菜单快捷方式。
+- [Windows 便携版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.1/VPBuddy-Portable-0.1.1-x64.exe)：无需安装，直接运行。
+
+### macOS
+
+- [Apple Silicon 版（arm64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.1/VPBuddy-0.1.1-mac-arm64.dmg)：适用于 Apple M 系列芯片。
+- [Intel 版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.1/VPBuddy-0.1.1-mac-x64.dmg)：适用于 Intel 芯片 Mac。
+
+### 主要更新
 
 - VPBuddy 文本消息在点击发送后立即进入对话区，并显示真实的发送中、失败和重试状态。
 - 后端响应只用于确认用户消息和追加真实 VPBuddy 回复，客户端不生成伪回复。
@@ -15,15 +25,15 @@
 - AI 协同列表和内容详情统一使用安全 Markdown 渲染，保留标题、强调和列表层级。
 - 投屏材料增加即时加载反馈，修复全屏工具操作退出和截屏 PNG 再次预览失败。
 - 知识库状态列、分页和窄窗口布局重新对齐，避免文字重叠与裁切。
-- README 改用稳定的 `releases/latest` 入口，CI 同时生成版本化产物与稳定别名，并在发布前校验版本、tag 和资产完整性。
+- Release 下载区只保留 4 个版本化安装文件，移除重复别名、更新差分文件和同平台重复压缩包。
 
-## 数据边界
+### 数据边界
 
 - 所有会议、聊天、材料、交付物和知识库数据均来自后端 API，本版本未引入业务 mock 数据。
 - 会议转录按登录账号和会议 ID 保存到本机，刷新、同账号重新登录和客户端重启后可恢复；多设备同步、服务端恢复和权威 transcript segments 仍依赖后端持久化。
 
-## 校验
+### 校验
 
 - JavaScript 语法检查通过。
 - 全部 Node 测试通过。
-- 桌面安装包由 GitHub Actions 根据 `v0.1.1` tag 构建并附加到本 Release。
+- 桌面安装包由 GitHub Actions 根据 `v0.1.1` tag 构建，发布前严格校验 4 个公开资产。
