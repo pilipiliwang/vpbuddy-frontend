@@ -68,8 +68,8 @@ test("text and material sending survive presentation/deliverable tab rerenders",
   assert.ok(tabCanvas >= 0 && composer > tabCanvas, "both center tabs must share the same composer below their canvas");
   assert.match(clickSource, /action\s*===\s*"stage-tab"[\s\S]{0,120}?state\.stageTab\s*=\s*target\.dataset\.tab/, "tab switching must use delegated state updates");
   assert.match(clickSource, /action\s*===\s*"send-vpbuddy-message"[\s\S]{0,160}?sendVpbuddyChatMessage/, "text sending must remain delegated after a rerender");
-  assert.match(clickSource, /action\s*===\s*"send-vpbuddy-material"[\s\S]{0,220}?fileUploadContext\s*=\s*"vpbuddy-material"/, "material sending must remain delegated after a rerender");
-  assert.match(renderSource, /renderFilePicker\(\)/, "every rerender must retain the shared native file picker");
+  assert.match(clickSource, /action\s*===\s*"send-vpbuddy-material"[\s\S]{0,220}?openFilePicker\(\s*"vpbuddy-material"/, "material sending must remain delegated after a rerender");
+  assert.match(renderSource, /ensureFilePicker\(\)/, "every rerender must retain the shared native file picker");
 });
 
 test("chat history refreshes retain local sending and failed records", () => {

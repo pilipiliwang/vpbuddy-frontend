@@ -1,6 +1,7 @@
 import { createVpbuddyApi } from "./api/client.js";
 import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
 import { filterPersonalKnowledgeDocuments } from "./utils/knowledge.js";
+import { aggregateMaterialProcessingPhase, resolveMaterialProcessingPhases } from "./utils/material-upload.js";
 import { renderMarkdown } from "./utils/markdown.js";
 import { createTranscriptRecordStore, reconcileTranscriptRecords } from "./utils/transcript.js";
 import { createZipBlob } from "./utils/zip.js";
@@ -480,7 +481,8 @@ function render() {
     settings: renderSettings
   };
 
-  updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`);
+  updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}`);
+  ensureFilePicker();
   requestAnimationFrame(() => {
     updateAnnotationViewport();
     if (state.meetingTitleEditing && !state.meetingTitleSaving) {
@@ -503,7 +505,29 @@ function render() {
 }
 
 function renderFilePicker() {
-  return `<input class="native-file-input" type="file" multiple accept=".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" />`;
+  return `<input class="native-file-input" data-stable-file-picker type="file" multiple accept=".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" />`;
+}
+
+function ensureFilePicker() {
+  let input = document.querySelector(".native-file-input[data-stable-file-picker]");
+  if (input) return input;
+  const template = document.createElement("template");
+  template.innerHTML = renderFilePicker();
+  input = template.content.firstElementChild;
+  document.body.appendChild(input);
+  return input;
+}
+
+function openFilePicker(context, accept) {
+  if (isUploadInProgress()) return false;
+  const input = ensureFilePicker();
+  state.fileUploadContext = context;
+  input.dataset.context = context;
+  input.dataset.meetingId = state.selectedMeetingId || "";
+  input.accept = accept;
+  input.value = "";
+  input.click();
+  return true;
 }
 
 function nowTime() {
@@ -687,7 +711,8 @@ function normalizeMaterial(raw, index = 0) {
     contentType: raw.content_type || raw.contentType || raw.mime_type || raw.mimeType || raw.metadata?.content_type || "",
     size: raw.sizeLabel || raw.size_label || formatFileSize(Number(raw.size || raw.size_bytes || 0)),
     time: formatBackendDateTime(raw.time || raw.created_at || raw.createdAt || raw.updated_at, nowTime()),
-    version: raw.version || "V1.0"
+    version: raw.version || "V1.0",
+    status: raw.status || "stored"
   };
 }
 
@@ -711,11 +736,23 @@ function normalizeUploadedMaterialResponse(payload, index = 0) {
 
 function mergeMaterials(refreshedMaterials, uploadedMaterials) {
   const merged = [];
-  const seen = new Set();
+  const indexes = new Map();
   for (const material of [...uploadedMaterials, ...refreshedMaterials]) {
-    if (!material?.id || seen.has(material.id)) continue;
-    seen.add(material.id);
-    merged.push(material);
+    if (!material?.id) continue;
+    const existingIndex = indexes.get(material.id);
+    if (existingIndex === undefined) {
+      indexes.set(material.id, merged.length);
+      merged.push(material);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    merged[existingIndex] = {
+      ...existing,
+      ...material,
+      contentType: material.contentType || existing.contentType,
+      name: material.name || existing.name,
+      status: material.status || existing.status
+    };
   }
   return merged;
 }
@@ -971,10 +1008,22 @@ function normalizeChatMessage(message) {
     time: source.created_at ? new Date(source.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : nowTime(),
     text: type === "answer" ? stripAssistantReasoning(rawText) : rawText,
     type,
+    role: source.role || (type === "answer" ? "assistant" : "user"),
     source: messageSource,
     materialId,
-    status: source.status || "sent"
+    materialStatus: source.material?.status || source.material_status || "",
+    status: source.status || "sent",
+    error: source.error || ""
   };
+}
+
+function applyMaterialProcessingStatuses(messages) {
+  const phases = resolveMaterialProcessingPhases(materials, messages);
+  for (const message of messages) {
+    if (message.type !== "material" || !message.materialId) continue;
+    message.status = phases.get(String(message.materialId)) || "uploaded";
+  }
+  return phases;
 }
 
 function normalizeChatHistoryResponse(payload) {
@@ -987,7 +1036,9 @@ function applyChatHistory(payload) {
   const pendingMaterialMessages = state.vpbuddyMessages.filter((message) => message.type === "material" && message.materialId);
   const localChatMessages = state.vpbuddyMessages.filter((message) => message.localOnly && ["sending", "failed"].includes(message.status));
   const mergedMessages = dedupeVpbuddyMessages([...messages, ...pendingMaterialMessages, ...localChatMessages]);
+  applyMaterialProcessingStatuses(mergedMessages);
   replaceArray(state.vpbuddyMessages, mergedMessages);
+  syncActiveMaterialProgress();
   state.showComposerHistory = mergedMessages.length > 0;
   return mergedMessages;
 }
@@ -1601,6 +1652,8 @@ function startMeetingEvents(meetingId) {
         if (event.type === "chat-message") {
           const message = normalizeChatMessage(event.data || {});
           if (addVpbuddyMessage(message)) {
+            applyMaterialProcessingStatuses(state.vpbuddyMessages);
+            syncActiveMaterialProgress();
             state.showComposerHistory = true;
             render();
           }
@@ -2512,10 +2565,7 @@ function renderMeetingLoadingColumns() {
           <p>正在同步会议记录、材料和交付物</p>
         </div>
       </div>
-      <div class="panel meeting-loading-composer">
-        <span class="loading-row short"></span>
-        <span class="loading-row"></span>
-      </div>
+      ${renderVpbuddyComposer()}
     </section>
     <aside class="ai-panel panel meeting-loading-panel">
       <div class="loading-tab-row"><span></span></div>
@@ -2619,10 +2669,31 @@ function startUploadProgress(context, name, total) {
     name,
     current: 0,
     total,
-    status: "uploading"
+    status: "uploading",
+    materialIds: [],
+    failureKind: ""
   };
   state.uploadProgress = progress;
   return progress;
+}
+
+function syncActiveMaterialProgress() {
+  const progress = state.uploadProgress;
+  if (!progress || progress.status !== "parsing" || !progress.materialIds.length) return;
+  const phase = aggregateMaterialProcessingPhase(materials, state.vpbuddyMessages, progress.materialIds);
+  if (phase === "uploaded") return;
+  progress.status = phase === "parsed" ? "complete" : "error";
+  progress.failureKind = phase === "parse-error" ? "parse" : "";
+}
+
+function scheduleCompletedUploadProgressClear(progress) {
+  if (progress.status !== "complete") return;
+  window.setTimeout(() => {
+    if (state.uploadProgress === progress && progress.status === "complete") {
+      state.uploadProgress = null;
+      render();
+    }
+  }, 1800);
 }
 
 function renderUploadProgress(context) {
@@ -2633,20 +2704,28 @@ function renderUploadProgress(context) {
   const isKnowledge = context === "knowledge";
   const isProminent = isSending || isKnowledge;
   const activeItem = Math.min(progress.total, progress.current + (progress.status === "uploading" ? 1 : 0));
+  const isParsing = progress.status === "parsing";
+  const isParseError = progress.status === "error" && progress.failureKind === "parse";
   const statusText = progress.status === "complete"
     ? `${progress.name} ${isSending ? "发送完成" : "上传完成"}`
     : progress.status === "error"
-      ? `${progress.name} ${isSending ? "发送失败" : "上传失败"}`
+      ? `${progress.name} ${isParseError ? "解析失败" : isSending ? "发送失败" : "上传失败"}`
+      : isParsing
+        ? `${progress.name} 上传成功，正在解析`
       : `${isSending ? "正在发送" : "正在上传"} ${progress.name}`;
   const progressTitle = progress.status === "complete"
     ? (isSending ? "材料发送完成" : "知识文档上传完成")
     : progress.status === "error"
-      ? (isSending ? "材料发送失败" : "知识文档上传失败")
+      ? (isParseError ? "材料解析失败" : isSending ? "材料发送失败" : "知识文档上传失败")
+      : isParsing
+        ? "上传成功，正在解析"
       : (isSending ? "正在发送材料" : "正在上传知识文档");
   const progressState = progress.status === "complete"
     ? "100%"
     : progress.status === "error"
       ? "失败"
+      : isParsing
+        ? "解析中"
       : (isSending ? "发送中" : "上传中");
   return `
     <div class="upload-progress ${isKnowledge ? "knowledge-upload-progress" : ""} ${isSending ? "vpbuddy-send-progress" : ""} ${progress.status} ${progress.status === "uploading" ? "indeterminate" : ""}" role="progressbar" aria-live="polite" aria-label="${escapeHtml(statusText)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
@@ -2666,6 +2745,7 @@ function renderUploadProgress(context) {
           <span>${progress.status === "uploading" ? `${isSending ? "正在发送" : "正在处理"}第 ${activeItem} 个${isSending ? "材料" : "文档"}` : escapeHtml(statusText)}</span>
           <span>${progress.current}/${progress.total} 已完成</span>
         </div>
+        ${progress.status === "error" ? `<button class="ghost compact" data-action="retry-upload" data-context="${escapeHtml(context)}">${isParseError ? "重新上传" : "重试"}</button>` : ""}
       ` : `<span>${escapeHtml(statusText)} · ${progress.current}/${progress.total}</span>`}
     </div>
   `;
@@ -3776,6 +3856,9 @@ async function captureStageScreenshot() {
     });
     state.showComposerHistory = true;
     progress.current = 1;
+    progress.materialIds = [uploadedMaterial.id];
+    progress.status = "parsing";
+    syncActiveMaterialProgress();
     render();
 
     const refreshRevision = meetingMaterialsRevision;
@@ -3790,6 +3873,7 @@ async function captureStageScreenshot() {
     if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
       const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
       replaceArray(materials, mergeMaterials(refreshedMaterials, [uploadedMaterial]));
+      syncActiveMaterialProgress();
     } else if (materialList.status === "rejected") {
       recordClientLog("warn", "截屏已上传，但会议材料清单刷新失败", { message: materialList.reason?.message || "unknown" });
     }
@@ -3805,7 +3889,6 @@ async function captureStageScreenshot() {
       : materials.at(-1)?.id || materials[0]?.id || "";
     state.meetingLeftTab = "materials";
     state.showComposerHistory = true;
-    progress.status = "complete";
     setToast(`截屏已上传为会议材料：${file.name}`);
   } catch (error) {
     if (meetingId !== state.selectedMeetingId) {
@@ -3814,15 +3897,11 @@ async function captureStageScreenshot() {
     }
     progress.current = 1;
     progress.status = "error";
+    progress.failureKind = "upload";
     setToast(`截屏上传失败：${error.message}`, false);
   }
   render();
-  window.setTimeout(() => {
-    if (state.uploadProgress === progress) {
-      state.uploadProgress = null;
-      render();
-    }
-  }, 1800);
+  scheduleCompletedUploadProgressClear(progress);
 }
 
 document.addEventListener("click", async (event) => {
@@ -4029,15 +4108,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "open-upload") {
-    if (isUploadInProgress()) return;
-    state.fileUploadContext = target.dataset.context || "material";
-    const input = document.querySelector(".native-file-input");
-    if (input) {
-      input.accept = state.fileUploadContext === "knowledge"
+    const context = target.dataset.context || "material";
+    openFilePicker(
+      context,
+      context === "knowledge"
         ? ".txt,.md,.pdf"
-        : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg";
-      input.click();
-    }
+        : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+    );
     return;
   }
   if (action === "capture-screenshot") {
@@ -4098,13 +4175,21 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "send-vpbuddy-material") {
-    if (isUploadInProgress()) return;
-    state.fileUploadContext = "vpbuddy-material";
-    const input = document.querySelector(".native-file-input");
-    if (input) {
-      input.accept = ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp";
-      input.click();
-    }
+    openFilePicker("vpbuddy-material", ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp");
+    return;
+  }
+  if (action === "retry-upload") {
+    const context = target.dataset.context || state.uploadProgress?.context || "vpbuddy-material";
+    state.uploadProgress = null;
+    render();
+    openFilePicker(
+      context,
+      context === "knowledge"
+        ? ".txt,.md,.pdf"
+        : context === "vpbuddy-material"
+          ? ".txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp"
+          : ".ppt,.pptx,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+    );
     return;
   }
   if (action === "refresh-collab") {
@@ -4245,8 +4330,12 @@ document.addEventListener("change", async (event) => {
     return;
   }
   const meetingId = state.selectedMeetingId;
+  if (event.target.dataset.meetingId && event.target.dataset.meetingId !== meetingId) {
+    event.target.value = "";
+    return;
+  }
   const names = files.map((file) => file.name).join("、");
-  const context = state.fileUploadContext;
+  const context = event.target.dataset.context || state.fileUploadContext;
   const progressContext = context;
   if (!meetingId) {
     setToast(context === "knowledge"
@@ -4297,6 +4386,13 @@ document.addEventListener("change", async (event) => {
           });
           state.showComposerHistory = true;
         }
+        progress.materialIds.push(uploadedMaterial.id);
+        progress.current = index + 1;
+        if (progress.current === progress.total) {
+          progress.status = "parsing";
+          syncActiveMaterialProgress();
+        }
+        render();
       } else {
         await api.uploadKnowledgeDocument(file, {
           meetingId,
@@ -4344,6 +4440,7 @@ document.addEventListener("change", async (event) => {
     if (materialList.status === "fulfilled" && meetingMaterialsRevision === refreshRevision) {
       const refreshedMaterials = normalizeMaterialsResponse(materialList.value);
       replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
+      syncActiveMaterialProgress();
     } else {
       if (materialList.status === "rejected") {
         recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: materialList.reason?.message || "unknown" });
@@ -4371,6 +4468,7 @@ document.addEventListener("change", async (event) => {
       if (meetingMaterialsRevision === refreshRevision) {
         const refreshedMaterials = normalizeMaterialsResponse(payload);
         replaceArray(materials, mergeMaterials(refreshedMaterials, uploadedMaterials));
+        syncActiveMaterialProgress();
       }
       state.selectedMaterial = uploadedMaterials.at(-1)?.id || state.selectedMaterial;
     } catch (error) {
@@ -4382,18 +4480,21 @@ document.addEventListener("change", async (event) => {
       recordClientLog("warn", "材料已上传，但会议资料列表刷新失败", { message: error.message });
     }
   }
-  progress.status = errors.length ? "error" : "complete";
+  if (errors.length) {
+    progress.status = "error";
+    progress.failureKind = "upload";
+  } else if (context === "knowledge") {
+    progress.status = "complete";
+  } else if (succeeded) {
+    progress.status = "parsing";
+    syncActiveMaterialProgress();
+  }
   setToast(errors.length
     ? `${succeeded}/${files.length} 个文件${context === "vpbuddy-material" ? "发送" : "上传"}成功；${errors[0]}`
     : `${names} ${context === "vpbuddy-material" ? "发送" : "上传"}成功`, false);
   event.target.value = "";
   render();
-  window.setTimeout(() => {
-    if (state.uploadProgress === progress) {
-      state.uploadProgress = null;
-      render();
-    }
-  }, 1800);
+  scheduleCompletedUploadProgressClear(progress);
 });
 
 document.addEventListener("keydown", (event) => {
