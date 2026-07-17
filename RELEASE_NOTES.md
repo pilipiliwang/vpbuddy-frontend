@@ -1,6 +1,6 @@
 # VPBuddy Releases
 
-## v0.1.3 · 2026-07-17
+## v0.1.3 · 2026-07-18
 
 ### Windows
 
