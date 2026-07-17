@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
-import vm from "node:vm";
 
+import { stripAssistantReasoning } from "../src/utils/collaboration.js";
 import { renderMarkdown } from "../src/utils/markdown.js";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -24,15 +24,6 @@ function cssRule(selector) {
   const match = new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`).exec(stylesSource);
   assert.ok(match, `missing CSS rule: ${selector}`);
   return match[1];
-}
-
-function loadReasoningStripper() {
-  const source = sourceBetween(
-    mainSource,
-    "function stripAssistantReasoning(value)",
-    "function renderCollabMarkdown(value)"
-  );
-  return vm.runInNewContext(`(${source.trim()})`);
 }
 
 test("transcript cards stack time above a full-width body", () => {
@@ -61,7 +52,6 @@ test("AI collaboration cards use stripped, safe Markdown output", () => {
   assert.doesNotMatch(panel, /item\.reason/, "frontend-only reason metadata must not be rendered");
   assert.doesNotMatch(panel, /innerHTML|insertAdjacentHTML/);
 
-  const stripAssistantReasoning = loadReasoningStripper();
   const markdown = stripAssistantReasoning(`<think>private chain of thought</think>
 ## 会议结论
 
@@ -82,7 +72,6 @@ test("AI collaboration cards use stripped, safe Markdown output", () => {
 });
 
 test("unterminated think blocks cannot leak into collaboration cards", () => {
-  const stripAssistantReasoning = loadReasoningStripper();
   assert.equal(stripAssistantReasoning("保留的正文</think>"), "保留的正文");
   assert.equal(stripAssistantReasoning("<THINK data-source=\"model\">未闭合的内部推理"), "");
 });

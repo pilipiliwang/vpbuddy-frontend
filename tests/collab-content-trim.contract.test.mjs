@@ -8,6 +8,7 @@ const repoRoot = process.env.VPBUDDY_FRONTEND_ROOT
   ? path.resolve(process.env.VPBUDDY_FRONTEND_ROOT)
   : fileURLToPath(new URL("../", import.meta.url));
 const mainSource = await readFile(path.join(repoRoot, "src", "main.js"), "utf8");
+const collaborationSource = await readFile(path.join(repoRoot, "src", "utils", "collaboration.js"), "utf8");
 const stylesSource = await readFile(path.join(repoRoot, "src", "styles.css"), "utf8");
 
 function sourceBetween(source, startMarker, endMarker) {
@@ -28,8 +29,9 @@ function cssRule(selector) {
 test("collaboration normalization keeps backend primary content without invented metadata", () => {
   const normalizer = sourceBetween(mainSource, "function normalizeCollabQuestions", "function normalizeChatMessage");
 
-  assert.match(normalizer, /question:\s*stripAssistantReasoning\(item\.question\)/);
-  assert.match(normalizer, /time:\s*item\.asked_at\s*\?/);
+  assert.match(normalizer, /return\s+normalizeCollabQuestionPayload\(payload\)/);
+  assert.match(collaborationSource, /\["content",\s*"text",\s*"question",\s*"suggestion"\]/);
+  assert.match(collaborationSource, /replace\(\/\\\\r\\\\n\|\\\\n\|\\\\r\/g,\s*"\\n"\)/);
   assert.doesNotMatch(normalizer, /\b(?:target|reason|status):/);
   assert.doesNotMatch(normalizer, /会议参与者|关联交付物|来自后端协同问答|待回答/);
 });

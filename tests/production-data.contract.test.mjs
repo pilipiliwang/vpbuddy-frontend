@@ -275,7 +275,7 @@ test("AI follow-up content sits directly below the AI collaboration heading", ()
 test("AI collaboration cards and details safely render Markdown without reasoning tags", () => {
   const aiPanelSource = sourceBetween(mainSource, "function renderAIPanel()", "function renderTimeline()");
   const modalSource = sourceBetween(mainSource, 'if (state.modal === "followup-detail")', 'if (state.modal === "all-explanations")');
-  assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,700}?stripAssistantReasoning\(item\.question/, "collaboration DTOs must remove model reasoning before display");
+  assertSourceIncludes(mainSource, /function\s+normalizeCollabQuestions[\s\S]{0,160}?normalizeCollabQuestionPayload\(payload\)/, "collaboration DTOs must pass through the shared content normalizer");
   assertSourceIncludes(mainSource, /function\s+renderCollabMarkdown\s*\(value\)[\s\S]{0,160}?renderMarkdown\(stripAssistantReasoning\(value\)\)/, "collaboration content must pass through the safe Markdown renderer");
   assertSourceIncludes(aiPanelSource, /renderCollabMarkdown\(item\.question\)/, "AI collaboration cards must use the collaboration Markdown boundary");
   assertSourceIncludes(aiPanelSource, /class=["']followup-markdown markdown-content["']/, "AI collaboration cards must expose structured Markdown styling");
