@@ -6,6 +6,7 @@ const { calculateDesktopZoom, calculateWindowGeometry } = require("./display-sca
 
 const appRoot = resolve(__dirname, "..");
 let staticServer = null;
+const WINDOW_REVEAL_TIMEOUT_MS = 3000;
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -302,6 +303,36 @@ function installDesktopDisplayScale(win) {
   });
 }
 
+function installStartupWindowReveal(win) {
+  let revealed = false;
+  let revealTimer = null;
+
+  const reveal = (reason) => {
+    if (revealed || win.isDestroyed()) return;
+    revealed = true;
+    if (revealTimer) clearTimeout(revealTimer);
+    revealTimer = null;
+
+    if (!win.isVisible()) win.show();
+    console.info(`[VPBuddy startup] Main window shown (${reason})`);
+
+    if (process.env.VPBUDDY_DESKTOP_DEVTOOLS === "1") {
+      win.webContents.openDevTools({ mode: "detach" });
+    }
+  };
+
+  win.once("ready-to-show", () => reveal("ready-to-show"));
+  win.webContents.once("did-finish-load", () => reveal("did-finish-load"));
+  revealTimer = setTimeout(() => reveal("timeout"), WINDOW_REVEAL_TIMEOUT_MS);
+
+  win.once("closed", () => {
+    if (revealTimer) clearTimeout(revealTimer);
+    revealTimer = null;
+  });
+
+  return reveal;
+}
+
 function createMainWindow(url) {
   const display = screen.getPrimaryDisplay();
   const windowGeometry = calculateWindowGeometry(display);
@@ -329,20 +360,17 @@ function createMainWindow(url) {
   });
   win.webContents.setZoomFactor(initialZoom.zoomFactor);
   installDesktopDisplayScale(win);
-
-  win.once("ready-to-show", () => {
-    win.show();
-    if (process.env.VPBUDDY_DESKTOP_DEVTOOLS === "1") {
-      win.webContents.openDevTools({ mode: "detach" });
-    }
-  });
+  const revealMainWindow = installStartupWindowReveal(win);
 
   win.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
     shell.openExternal(nextUrl);
     return { action: "deny" };
   });
 
-  win.loadURL(url);
+  win.loadURL(url).catch((error) => {
+    revealMainWindow("load-error");
+    dialog.showErrorBox("VPBuddy failed to load", error?.message || String(error));
+  });
   return win;
 }
 
@@ -373,6 +401,7 @@ if (!gotLock) {
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) return;
     if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
     win.focus();
   });
 
