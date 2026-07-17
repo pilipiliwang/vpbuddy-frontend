@@ -1,6 +1,6 @@
 {
   "name": "vpbuddy-frontend",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "VPBuddy desktop shell and frontend",
   "type": "module",
