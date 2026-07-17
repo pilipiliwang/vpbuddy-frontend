@@ -28,7 +28,7 @@ test("material preview paints loading immediately and settles success or failure
   assert.ok(loadingIndex >= 0, "preview loading state must be explicit");
   assert.ok(firstRenderIndex > loadingIndex, "the loading state must render immediately");
   assert.ok(downloadIndex > firstRenderIndex, "loading must paint before the authenticated file request begins");
-  assert.match(loadSource, /catch\s*\(error\)[\s\S]*?presentationError\s*=\s*`材料读取失败：\$\{error\.message\}`/);
+  assert.match(loadSource, /catch\s*\(error\)[\s\S]*?presentationError\s*=\s*materialPreviewErrorMessage\(error\)/);
   assert.match(loadSource, /finally\s*\{[\s\S]*?presentationLoading\s*=\s*false;[\s\S]*?render\(\)/);
   assert.match(renderSource, /class="material-preview-status"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-busy="true"/);
   assert.match(renderSource, /meeting-loading-spinner[\s\S]*?正在准备投屏预览[\s\S]*?正在读取/);
@@ -57,6 +57,33 @@ test("screenshot PNG previews reuse the generated Blob before authenticated down
   assert.ok(cachedLookupIndex >= 0, "material preview must check its Blob cache");
   assert.ok(authenticatedDownloadIndex > cachedLookupIndex, "authenticated material download must remain the cache-miss fallback");
   assert.match(mainSource, /function clearMaterialPreviewDownloadCache\(\)\s*\{\s*materialPreviewDownloadCache\.clear\(\)/);
+});
+
+test("manual material uploads retain their original Blob for immediate presentation", () => {
+  const uploadSource = sourceBetween(mainSource, 'document.addEventListener("change"', 'document.addEventListener("keydown"');
+
+  assert.match(uploadSource, /api\.uploadMaterial\(meetingId,\s*file\)[\s\S]*?cacheMaterialPreviewDownload\(uploadedMaterial,\s*\{[\s\S]*?blob:\s*file,[\s\S]*?filename:\s*file\.name,[\s\S]*?contentType:\s*file\.type[\s\S]*?\},\s*meetingId,\s*true\)/);
+});
+
+test("presentation supports a scrollable PDF reader and local text formats", () => {
+  const loadSource = sourceBetween(mainSource, "async function loadMaterialPreview", "async function presentMaterial");
+  const renderSource = sourceBetween(mainSource, "function renderMaterialPreviewContent", "function renderPresentationCanvas");
+
+  assert.match(mainSource, /md:\s*"text\/markdown"/);
+  assert.match(mainSource, /csv:\s*"text\/csv"/);
+  assert.match(loadSource, /isTextMaterialPreview\(resolvedMime\)[\s\S]*?await previewBlob\.text\(\)/);
+  assert.match(renderSource, /class="material-pdf-preview"[\s\S]*?#toolbar=1&navpanes=0&scrollbar=1&view=FitH/);
+  assert.match(renderSource, /class="material-text-preview markdown-body"[\s\S]*?renderMarkdown\(state\.presentationText\)/);
+  assert.match(stylesSource, /\.material-text-preview\s*\{[\s\S]*?overflow:\s*auto/);
+  assert.match(stylesSource, /\.annotation-canvas\.tool-cursor \.annotation-layer\s*\{[\s\S]*?pointer-events:\s*none/);
+});
+
+test("network-level preview failures are actionable and retryable", () => {
+  const renderSource = sourceBetween(mainSource, "function renderMaterialPreviewContent", "function renderPresentationCanvas");
+
+  assert.match(mainSource, /failed to fetch\|networkerror[\s\S]*?后端未能返回材料原文件/);
+  assert.match(renderSource, /data-action="retry-material-preview"/);
+  assert.match(mainSource, /action\s*===\s*"retry-material-preview"[\s\S]*?loadMaterialPreview\(materialId\)/);
 });
 
 test("fullscreen rendering patches the active element instead of replacing it", () => {

@@ -69,6 +69,7 @@ const state = {
   presentationUrl: "",
   presentationMime: "",
   presentationName: "",
+  presentationText: "",
   presentationLoading: false,
   presentationError: "",
   recordingStatus: "idle",
@@ -1342,6 +1343,7 @@ function clearPresentationPreview() {
   state.presentationUrl = "";
   state.presentationMime = "";
   state.presentationName = "";
+  state.presentationText = "";
   state.presentationLoading = false;
   state.presentationError = "";
 }
@@ -2136,13 +2138,23 @@ const materialPreviewMimeByExtension = Object.freeze({
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
-  bmp: "image/bmp"
+  bmp: "image/bmp",
+  txt: "text/plain",
+  log: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  xml: "application/xml",
+  html: "text/html"
 });
 
 function normalizePreviewMime(value) {
   const mime = String(value || "").split(";", 1)[0].trim().toLowerCase();
   if (mime === "application/pdf") return mime;
   if (["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"].includes(mime)) return mime;
+  if (mime.startsWith("text/")) return mime;
+  if (["application/json", "application/xml"].includes(mime)) return mime;
   return "";
 }
 
@@ -2153,6 +2165,28 @@ function resolveMaterialPreviewMime(material, download) {
   if (explicitMime) return explicitMime;
   const extension = String(material?.name || download?.filename || "").split(".").pop().toLowerCase();
   return materialPreviewMimeByExtension[extension] || (material?.type === "pdf" ? "application/pdf" : "");
+}
+
+function isTextMaterialPreview(mime) {
+  return mime.startsWith("text/") || ["application/json", "application/xml"].includes(mime);
+}
+
+function normalizeMaterialPreviewText(text, mime) {
+  const value = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (mime !== "application/json") return value;
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function materialPreviewErrorMessage(error) {
+  const message = String(error?.message || error || "未知错误");
+  if (/failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
+    return "后端未能返回材料原文件，请重试；若持续失败，请检查材料下载接口。";
+  }
+  return `材料读取失败：${message}`;
 }
 
 async function loadMaterialPreview(materialId) {
@@ -2173,17 +2207,28 @@ async function loadMaterialPreview(materialId) {
     if (loadSequence !== materialPreviewLoadSequence) return;
     const resolvedMime = resolveMaterialPreviewMime(material, download);
     state.presentationMime = resolvedMime;
-    if (resolvedMime) {
+    if (isTextMaterialPreview(resolvedMime)) {
+      const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
+      state.presentationText = normalizeMaterialPreviewText(await previewBlob.text(), resolvedMime);
+    } else if (resolvedMime) {
       const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
       state.presentationUrl = URL.createObjectURL(previewBlob);
     } else {
-      state.presentationError = "当前文件格式暂不支持直接预览";
+      state.presentationError = "当前格式暂不支持在线阅读，可下载原文件查看。";
     }
-    setToast(state.presentationUrl ? `${material.name} 已投屏` : `${material.name} 已选中；该格式需后端提供页面预览`);
+    setToast(state.presentationUrl || isTextMaterialPreview(resolvedMime)
+      ? `${material.name} 已投屏`
+      : `${material.name} 已选中；当前格式暂不支持在线阅读`);
   } catch (error) {
     if (loadSequence !== materialPreviewLoadSequence) return;
-    state.presentationError = `材料读取失败：${error.message}`;
-    setToast(`材料读取失败：${error.message}`, false);
+    state.presentationError = materialPreviewErrorMessage(error);
+    recordClientLog("error", "Material preview failed", {
+      meeting_id: state.selectedMeetingId,
+      material_id: material.id,
+      filename: material.name,
+      message: error?.message || String(error)
+    });
+    setToast(state.presentationError, false);
   } finally {
     if (loadSequence !== materialPreviewLoadSequence) return;
     state.presentationLoading = false;
@@ -2813,10 +2858,22 @@ function renderMaterialPreviewContent(selectedMaterial) {
     return `<img src="${state.presentationUrl}" alt="${escapeHtml(materialName)}" />`;
   }
   if (state.presentationUrl && state.presentationMime.includes("pdf")) {
-    return `<iframe class="material-pdf-preview" src="${state.presentationUrl}" title="${escapeHtml(materialName)}"></iframe>`;
+    return `<iframe class="material-pdf-preview" src="${state.presentationUrl}#toolbar=1&navpanes=0&scrollbar=1&view=FitH" title="${escapeHtml(materialName)}"></iframe>`;
+  }
+  if (isTextMaterialPreview(state.presentationMime)) {
+    if (state.presentationMime === "text/markdown") {
+      return `<article class="material-text-preview markdown-body">${renderMarkdown(state.presentationText)}</article>`;
+    }
+    return `<pre class="material-text-preview material-plain-text">${escapeHtml(state.presentationText || "（空文档）")}</pre>`;
   }
   if (state.presentationError) {
-    return renderEmptyState(materialName, state.presentationError, "stage-empty material-preview-error");
+    return `
+      <div class="stage-empty material-preview-error empty-state">
+        <strong>${escapeHtml(materialName)}</strong>
+        <p>${escapeHtml(state.presentationError)}</p>
+        ${selectedMaterial ? `<button class="ghost" data-action="retry-material-preview" data-id="${escapeHtml(selectedMaterial.id)}">${icon("refresh", 16)}重试读取</button>` : ""}
+      </div>
+    `;
   }
   return renderEmptyState(
     state.presentationName || selectedMaterial?.name || "暂无投屏内容",
@@ -3995,6 +4052,11 @@ document.addEventListener("click", async (event) => {
     setToast("材料已选中，双击可投屏");
     return;
   }
+  if (action === "retry-material-preview") {
+    const materialId = target.dataset.id || state.selectedMaterial;
+    if (materialId) void loadMaterialPreview(materialId);
+    return;
+  }
   if (action === "download-material") {
     const material = materials.find((item) => item.id === target.dataset.id);
     if (material) {
@@ -4214,6 +4276,13 @@ document.addEventListener("change", async (event) => {
         }
         meetingMaterialsRevision += 1;
         const uploadedMaterial = normalizeUploadedMaterialResponse(uploaded, materials.length);
+        if (/^Material \d+$/.test(uploadedMaterial.name)) uploadedMaterial.name = file.name;
+        if (!uploadedMaterial.contentType) uploadedMaterial.contentType = file.type;
+        cacheMaterialPreviewDownload(uploadedMaterial, {
+          blob: file,
+          filename: file.name,
+          contentType: file.type
+        }, meetingId, true);
         uploadedMaterials.push(uploadedMaterial);
         replaceArray(materials, mergeMaterials(materials, [uploadedMaterial]));
         state.selectedMaterial = uploadedMaterial.id;
