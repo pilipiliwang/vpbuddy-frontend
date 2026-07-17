@@ -79,6 +79,21 @@ test("screenshot upload locks shared upload actions and refreshes materials and 
   assert.doesNotMatch(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be uploaded through a second attachment endpoint");
 });
 
+test("screenshots target the complete stage surface instead of image-only previews", () => {
+  assert.match(captureSource, /document\.querySelector\("\.annotation-canvas"\)/);
+  assert.match(captureSource, /await html2canvas\(stage,[\s\S]*?ignoreElements/);
+  assert.match(captureSource, /const previewCanvas\s*=\s*surface\.querySelector\("canvas"\)/);
+  assert.doesNotMatch(captureSource, /暂无可截屏的投屏内容/);
+  assert.match(captureSource, /drawStageAnnotations\(context,\s*fallback\.width,\s*fallback\.height\)/);
+});
+
+test("all annotation tools share the stage overlay and retain reversible history", () => {
+  assert.match(mainSource, /function getAnnotationSurfaceRect\(\)[\s\S]*?\.stage-render-surface/);
+  assert.match(mainSource, /function saveAnnotationHistory\([\s\S]*?annotationRedoStack\s*=\s*\[\]/);
+  assert.match(mainSource, /action\s*===\s*"annotation-redo"[\s\S]*?restoreAnnotationHistory/);
+  assert.match(presentationSource, /data-action="annotation-undo"[\s\S]*?data-action="annotation-redo"/);
+});
+
 test("manual uploads retain truthful status until their post-upload refresh completes", () => {
   const finalStatus = changeHandlerSource.lastIndexOf('progress.status = errors.length ? "error" : "complete"');
   const vpbuddyRefresh = changeHandlerSource.indexOf('if (context === "vpbuddy-material" && succeeded)');

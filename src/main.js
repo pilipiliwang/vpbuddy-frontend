@@ -53,6 +53,8 @@ const state = {
   annotationColor: "#2f8cff",
   penSize: 4,
   annotations: [],
+  annotationUndoStack: [],
+  annotationRedoStack: [],
   drawingAnnotationId: "",
   textDraft: null,
   composerText: "",
@@ -72,6 +74,8 @@ const state = {
   presentationText: "",
   presentationLoading: false,
   presentationError: "",
+  presentationPdfPageCount: 0,
+  presentationPdfError: "",
   recordingStatus: "idle",
   recordingStartedAt: 0,
   recordingElapsed: 0,
@@ -112,6 +116,11 @@ let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
 let meetingMaterialsRevision = 0;
 let vpbuddyChatRequestSequence = 0;
+let presentationPreviewBlob = null;
+let pdfRendererModulePromise = null;
+let html2canvasModulePromise = null;
+let pdfResizeTimer = 0;
+let pdfPreviewRuntime = createEmptyPdfPreviewRuntime();
 const pendingVpbuddyChatRequests = new Map();
 const materialPreviewDownloadCache = new Map();
 
@@ -212,6 +221,8 @@ const iconPaths = {
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4"/><path d="m15.4 6.5-6.8 4"/>',
   sparkle: '<path d="M12 3 9.8 8.8 4 11l5.8 2.2L12 19l2.2-5.8L20 11l-5.8-2.2Z"/><path d="M19 3v4"/><path d="M21 5h-4"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v2"/><path d="m19 6-1 14c-.1 1.1-1 2-2 2H8c-1 0-1.9-.9-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v4"/>',
+  redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9h-9a7 7 0 0 0-7 7v4"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
   user: '<path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/>',
   zoom: '<path d="M5 12h14"/><path d="M12 5v14"/>'
@@ -419,6 +430,16 @@ function patchDomNode(current, next) {
     return;
   }
 
+  const stableStageSurface = current.dataset.stableStageSurface;
+  if (
+    stableStageSurface
+    && stableStageSurface === next.dataset.stableStageSurface
+    && current.dataset.stableStageSource === next.dataset.stableStageSource
+  ) {
+    syncDomAttributes(current, next);
+    return;
+  }
+
   const stableFrameKey = current.dataset.stableDemoFrame;
   if (
     current.tagName === "IFRAME"
@@ -458,6 +479,14 @@ function patchDomChildren(currentParent, nextParent) {
 function updateAppMarkup(nextMarkup) {
   const template = document.createElement("template");
   template.innerHTML = nextMarkup;
+  const stableStageSurfaces = Array.from(app.querySelectorAll("[data-stable-stage-surface]"));
+  const canPreserveStageSurface = stableStageSurfaces.some((currentSurface) => {
+    const key = currentSurface.dataset.stableStageSurface;
+    const source = currentSurface.dataset.stableStageSource;
+    const nextSurface = Array.from(template.content.querySelectorAll("[data-stable-stage-surface]"))
+      .find((candidate) => candidate.dataset.stableStageSurface === key);
+    return nextSurface && source === nextSurface.dataset.stableStageSource;
+  });
   const stableFrames = Array.from(app.querySelectorAll("iframe[data-stable-demo-frame]"));
   const canPreserveFrame = stableFrames.some((currentFrame) => {
     const key = currentFrame.dataset.stableDemoFrame;
@@ -466,7 +495,7 @@ function updateAppMarkup(nextMarkup) {
     return nextFrame && currentFrame.getAttribute("src") === nextFrame.getAttribute("src");
   });
   const preserveFullscreenElement = Boolean(document.fullscreenElement && app.contains(document.fullscreenElement));
-  if (canPreserveFrame || preserveFullscreenElement) patchDomChildren(app, template.content);
+  if (canPreserveFrame || preserveFullscreenElement || canPreserveStageSurface) patchDomChildren(app, template.content);
   else app.innerHTML = nextMarkup;
 }
 
@@ -483,6 +512,7 @@ function render() {
   updateAppMarkup(`${(views[state.view] || renderWorkspace)()}${renderToast()}${renderActionModal()}${renderFilePicker()}`);
   requestAnimationFrame(() => {
     updateAnnotationViewport();
+    void ensurePdfPreviewMounted();
     if (state.meetingTitleEditing && !state.meetingTitleSaving) {
       const titleInput = document.querySelector(".stage-title-input");
       if (titleInput) {
@@ -1337,15 +1367,136 @@ function scheduleKnowledgeSearch() {
   }, 350);
 }
 
+function createEmptyPdfPreviewRuntime() {
+  return {
+    source: "",
+    blob: null,
+    loadingTask: null,
+    loadPromise: null,
+    document: null,
+    renderTask: null,
+    renderPromise: null,
+    canvas: null,
+    page: 0,
+    renderWidth: 0,
+    requestedPage: 0,
+    requestedWidth: 0
+  };
+}
+
+function resetPdfPreviewRuntime() {
+  const runtime = pdfPreviewRuntime;
+  runtime.renderTask?.cancel?.();
+  const cleanup = runtime.loadingTask?.destroy?.() || runtime.document?.destroy?.();
+  if (cleanup?.catch) cleanup.catch(() => {});
+  pdfPreviewRuntime = createEmptyPdfPreviewRuntime();
+}
+
+function loadPdfRendererModule() {
+  if (!pdfRendererModulePromise) {
+    const moduleUrl = new URL("../node_modules/pdfjs-dist/build/pdf.mjs", import.meta.url);
+    const workerUrl = new URL("../node_modules/pdfjs-dist/build/pdf.worker.mjs", import.meta.url);
+    pdfRendererModulePromise = import(moduleUrl.href).then((pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.href;
+      return pdfjs;
+    }).catch((error) => {
+      pdfRendererModulePromise = null;
+      throw error;
+    });
+  }
+  return pdfRendererModulePromise;
+}
+
+function loadHtml2CanvasModule() {
+  if (!html2canvasModulePromise) {
+    const moduleUrl = new URL("../node_modules/html2canvas/dist/html2canvas.esm.js", import.meta.url);
+    html2canvasModulePromise = import(moduleUrl.href).then((module) => module.default || module).catch((error) => {
+      html2canvasModulePromise = null;
+      throw error;
+    });
+  }
+  return html2canvasModulePromise;
+}
+
+async function ensurePdfPreviewMounted() {
+  const surface = document.querySelector(".material-pdf-preview[data-pdf-source]");
+  if (!surface || !presentationPreviewBlob || !state.presentationMime.includes("pdf")) return;
+  const source = surface.dataset.pdfSource;
+  const width = Math.max(1, Math.floor(surface.clientWidth));
+  const requestedPage = clamp(state.currentSlide, 1, Math.max(1, pdfPreviewRuntime.document?.numPages || 1));
+  const runtime = pdfPreviewRuntime;
+
+  if (runtime.source !== source) {
+    resetPdfPreviewRuntime();
+    pdfPreviewRuntime.source = source;
+    const previewBlob = presentationPreviewBlob;
+    pdfPreviewRuntime.blob = previewBlob;
+    try {
+      const pdfjs = await loadPdfRendererModule();
+      if (pdfPreviewRuntime.source !== source) return;
+      pdfPreviewRuntime.loadingTask = pdfjs.getDocument({ data: new Uint8Array(await previewBlob.arrayBuffer()) });
+      pdfPreviewRuntime.document = await pdfPreviewRuntime.loadingTask.promise;
+      if (pdfPreviewRuntime.source !== source) return;
+      state.presentationPdfPageCount = pdfPreviewRuntime.document.numPages;
+      state.currentSlide = clamp(state.currentSlide, 1, state.presentationPdfPageCount);
+      render();
+    } catch (error) {
+      if (pdfPreviewRuntime.source !== source) return;
+      state.presentationPdfError = materialPreviewErrorMessage(error);
+      state.presentationError = "PDF 无法在当前设备中渲染，请下载原文件查看。";
+      render();
+      return;
+    }
+  }
+
+  const activeRuntime = pdfPreviewRuntime;
+  const page = clamp(state.currentSlide, 1, activeRuntime.document?.numPages || 1);
+  if (!activeRuntime.document || (activeRuntime.page === page && activeRuntime.renderWidth === width)) return;
+  const canvas = surface.querySelector(".material-pdf-canvas");
+  if (!canvas) return;
+  activeRuntime.renderTask?.cancel?.();
+  try {
+    const pdfPage = await activeRuntime.document.getPage(page);
+    if (pdfPreviewRuntime !== activeRuntime || activeRuntime.source !== source) return;
+    const baseViewport = pdfPage.getViewport({ scale: 1 });
+    const scale = Math.max(0.5, width / baseViewport.width);
+    const viewport = pdfPage.getViewport({ scale });
+    const ratio = window.devicePixelRatio || 1;
+    const scrollTop = surface.scrollTop;
+    canvas.width = Math.ceil(viewport.width * ratio);
+    canvas.height = Math.ceil(viewport.height * ratio);
+    canvas.style.width = `${Math.ceil(viewport.width)}px`;
+    canvas.style.height = `${Math.ceil(viewport.height)}px`;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const renderTask = pdfPage.render({ canvasContext: context, viewport });
+    activeRuntime.renderTask = renderTask;
+    await renderTask.promise;
+    if (pdfPreviewRuntime !== activeRuntime || activeRuntime.source !== source) return;
+    activeRuntime.page = page;
+    activeRuntime.renderWidth = width;
+    surface.scrollTop = scrollTop;
+  } catch (error) {
+    if (error?.name !== "RenderingCancelledException") {
+      state.presentationPdfError = materialPreviewErrorMessage(error);
+    }
+  }
+}
+
 function clearPresentationPreview() {
   materialPreviewLoadSequence += 1;
+  resetPdfPreviewRuntime();
   if (state.presentationUrl.startsWith("blob:")) URL.revokeObjectURL(state.presentationUrl);
+  presentationPreviewBlob = null;
   state.presentationUrl = "";
   state.presentationMime = "";
   state.presentationName = "";
   state.presentationText = "";
   state.presentationLoading = false;
   state.presentationError = "";
+  state.presentationPdfPageCount = 0;
+  state.presentationPdfError = "";
+  state.currentSlide = 1;
 }
 
 function getMaterialPreviewCacheKeys(material, meetingId = state.selectedMeetingId, includeName = true) {
@@ -2212,6 +2363,7 @@ async function loadMaterialPreview(materialId) {
       state.presentationText = normalizeMaterialPreviewText(await previewBlob.text(), resolvedMime);
     } else if (resolvedMime) {
       const previewBlob = download.blob.slice(0, download.blob.size, resolvedMime);
+      presentationPreviewBlob = previewBlob;
       state.presentationUrl = URL.createObjectURL(previewBlob);
     } else {
       state.presentationError = "当前格式暂不支持在线阅读，可下载原文件查看。";
@@ -2858,7 +3010,15 @@ function renderMaterialPreviewContent(selectedMaterial) {
     return `<img src="${state.presentationUrl}" alt="${escapeHtml(materialName)}" />`;
   }
   if (state.presentationUrl && state.presentationMime.includes("pdf")) {
-    return `<iframe class="material-pdf-preview" src="${state.presentationUrl}#toolbar=1&navpanes=0&scrollbar=1&view=FitH" title="${escapeHtml(materialName)}"></iframe>`;
+    return `
+      <div
+        class="material-pdf-preview"
+        data-stable-stage-surface="material-preview"
+        data-stable-stage-source="${escapeHtml(state.presentationUrl)}"
+        data-pdf-source="${escapeHtml(state.presentationUrl)}"
+        aria-label="${escapeHtml(materialName)}"
+      ><canvas class="material-pdf-canvas"></canvas></div>
+    `;
   }
   if (isTextMaterialPreview(state.presentationMime)) {
     if (state.presentationMime === "text/markdown") {
@@ -2911,7 +3071,8 @@ function renderPresentationCanvas() {
         <button class="size-step" data-action="annotation-size" data-size="1">+</button>
       </div>
       <div class="tool-group">
-        <button title="撤销批注" data-action="annotation-undo">${icon("refresh")}</button>
+        <button title="撤销批注" aria-label="撤销批注" data-action="annotation-undo" ${state.annotationUndoStack.length ? "" : "disabled"}>${icon("undo")}</button>
+        <button title="重做批注" aria-label="重做批注" data-action="annotation-redo" ${state.annotationRedoStack.length ? "" : "disabled"}>${icon("redo")}</button>
         <button title="清空批注" data-action="annotation-clear">${icon("close")}</button>
       </div>
       <div class="tool-group slide-tools">
@@ -2922,7 +3083,7 @@ function renderPresentationCanvas() {
       <button class="fullscreen-corners" data-action="toggle-fullscreen" title="全屏展示" aria-label="全屏展示">⛶</button>
     </div>
     <div class="slide-frame annotation-canvas tool-${state.activeTool}">
-      <div class="stage-zoom-layer" style="--stage-zoom:${state.zoom / 100}">
+      <div class="stage-zoom-layer stage-render-surface" style="--stage-zoom:${state.zoom / 100}">
         ${renderMaterialPreviewContent(selectedMaterial)}
         <svg class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="会议批注层">${annotations.svg}</svg>
         <div class="annotation-text-layer">
@@ -3571,53 +3732,16 @@ function createAnnotationId() {
   return `ann-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function getAnnotationImageRect(visual = false) {
-  const canvas = document.querySelector(".annotation-canvas");
-  const image = canvas?.querySelector("img");
-  if (!canvas || !image) return null;
-  const frame = canvas.getBoundingClientRect();
-  const imageRatio = image.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : 16 / 9;
-  const frameRatio = frame.width / frame.height;
-  let width = frame.width;
-  let height = frame.height;
-  let left = frame.left;
-  let top = frame.top;
-  if (frameRatio > imageRatio) {
-    width = frame.height * imageRatio;
-    left = frame.left + (frame.width - width) / 2;
-  } else {
-    height = frame.width / imageRatio;
-    top = frame.top + (frame.height - height) / 2;
-  }
-  if (visual && state.zoom !== 100) {
-    const zoom = state.zoom / 100;
-    const centerX = frame.left + frame.width / 2;
-    const centerY = frame.top + frame.height / 2;
-    left = centerX + (left - centerX) * zoom;
-    top = centerY + (top - centerY) * zoom;
-    width *= zoom;
-    height *= zoom;
-  }
-  return { left, top, width, height, frameLeft: frame.left, frameTop: frame.top };
+function getAnnotationSurfaceRect() {
+  return document.querySelector(".stage-render-surface")?.getBoundingClientRect() || null;
 }
 
 function updateAnnotationViewport() {
-  const rect = getAnnotationImageRect();
-  const layer = document.querySelector(".annotation-layer");
-  const textLayer = document.querySelector(".annotation-text-layer");
-  if (!rect || !layer || !textLayer) return;
-  [layer, textLayer].forEach((element) => {
-    element.style.left = `${rect.left - rect.frameLeft}px`;
-    element.style.top = `${rect.top - rect.frameTop}px`;
-    element.style.right = "auto";
-    element.style.bottom = "auto";
-    element.style.width = `${rect.width}px`;
-    element.style.height = `${rect.height}px`;
-  });
+  void ensurePdfPreviewMounted();
 }
 
 function getCanvasPoint(event) {
-  const rect = getAnnotationImageRect(true);
+  const rect = getAnnotationSurfaceRect();
   if (!rect) return null;
   if (event.clientX < rect.left || event.clientX > rect.left + rect.width || event.clientY < rect.top || event.clientY > rect.top + rect.height) {
     return null;
@@ -3628,10 +3752,30 @@ function getCanvasPoint(event) {
   };
 }
 
+function cloneAnnotations(annotations = state.annotations) {
+  return structuredClone(annotations);
+}
+
+function saveAnnotationHistory() {
+  state.annotationUndoStack.push(cloneAnnotations());
+  if (state.annotationUndoStack.length > 100) state.annotationUndoStack.shift();
+  state.annotationRedoStack = [];
+}
+
+function restoreAnnotationHistory(from, to) {
+  const snapshot = from.pop();
+  if (!snapshot) return false;
+  to.push(cloneAnnotations());
+  state.annotations = snapshot;
+  state.textDraft = null;
+  return true;
+}
+
 function commitTextDraft() {
   if (!state.textDraft) return;
   const text = state.textDraft.value.trim();
   if (text) {
+    saveAnnotationHistory();
     state.annotations.push({
       id: createAnnotationId(),
       type: "text",
@@ -3645,6 +3789,7 @@ function commitTextDraft() {
 }
 
 function removeAnnotation(id) {
+  saveAnnotationHistory();
   state.annotations = state.annotations.filter((item) => item.id !== id);
 }
 
@@ -3712,31 +3857,39 @@ async function captureStageScreenshot() {
     render();
     return;
   }
-  const image = document.querySelector(".annotation-canvas img");
-  if (!image) {
-    setToast("暂无可截屏的投屏内容");
+  const stage = document.querySelector(".annotation-canvas");
+  const surface = document.querySelector(".stage-render-surface");
+  if (!stage || !surface) {
+    setToast("当前投屏区域尚未就绪，请稍后重试", false);
     render();
     return;
   }
-
-  if (!image.complete) {
-    await new Promise((resolve, reject) => {
-      image.addEventListener("load", resolve, { once: true });
-      image.addEventListener("error", reject, { once: true });
+  let blob = null;
+  try {
+    const html2canvas = await loadHtml2CanvasModule();
+    const captureCanvas = await html2canvas(stage, {
+      backgroundColor: "#061225",
+      scale: Math.min(2, window.devicePixelRatio || 1),
+      useCORS: true,
+      ignoreElements: (element) => element.matches?.(".stage-capture-button")
     });
-    if (meetingId !== state.selectedMeetingId) return;
+    blob = await canvasToPngBlob(captureCanvas);
+  } catch (error) {
+    const rect = stage.getBoundingClientRect();
+    const fallback = document.createElement("canvas");
+    fallback.width = Math.max(1, Math.round(rect.width));
+    fallback.height = Math.max(1, Math.round(rect.height));
+    const context = fallback.getContext("2d");
+    context.fillStyle = "#061225";
+    context.fillRect(0, 0, fallback.width, fallback.height);
+    const previewCanvas = surface.querySelector("canvas");
+    const image = surface.querySelector("img");
+    if (previewCanvas) context.drawImage(previewCanvas, 0, 0, fallback.width, fallback.height);
+    else if (image?.complete) context.drawImage(image, 0, 0, fallback.width, fallback.height);
+    drawStageAnnotations(context, fallback.width, fallback.height);
+    blob = await canvasToPngBlob(fallback);
+    recordClientLog("warn", "Stage screenshot used visual fallback", { message: error?.message || String(error) });
   }
-
-  const width = image.naturalWidth || 1600;
-  const height = image.naturalHeight || 900;
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(image, 0, 0, width, height);
-  drawStageAnnotations(ctx, width, height);
-
-  const blob = await canvasToPngBlob(canvas);
   if (meetingId !== state.selectedMeetingId) return;
   if (!blob) {
     setToast("截屏生成失败，请重试");
@@ -4136,10 +4289,13 @@ document.addEventListener("click", async (event) => {
   if (action === "annotation-color") state.annotationColor = target.dataset.color;
   if (action === "annotation-size") state.penSize = clamp(state.penSize + Number(target.dataset.size), 2, 10);
   if (action === "annotation-undo") {
-    state.annotations.pop();
-    setToast("已撤销上一处批注");
+    if (restoreAnnotationHistory(state.annotationUndoStack, state.annotationRedoStack)) setToast("已撤销上一处批注");
+  }
+  if (action === "annotation-redo") {
+    if (restoreAnnotationHistory(state.annotationRedoStack, state.annotationUndoStack)) setToast("已重做批注");
   }
   if (action === "annotation-clear") {
+    if (state.annotations.length) saveAnnotationHistory();
     state.annotations = [];
     state.textDraft = null;
     setToast("已清空当前页批注");
@@ -4157,8 +4313,11 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "select-slide") state.currentSlide = Number(target.dataset.slide);
   if (action === "slide-step") {
-    state.currentSlide = 1;
-    setToast("当前材料暂不支持翻页", false);
+    if (state.presentationMime.includes("pdf") && state.presentationPdfPageCount) {
+      state.currentSlide = clamp(state.currentSlide + Number(target.dataset.step), 1, state.presentationPdfPageCount);
+    } else {
+      setToast("当前材料暂不支持翻页", false);
+    }
   }
   if (action === "concept-search") {
     state.modal = "concept-search";
@@ -4472,6 +4631,7 @@ document.addEventListener("pointerdown", (event) => {
   }
 
   const id = createAnnotationId();
+  saveAnnotationHistory();
   if (state.activeTool === "pen") {
     state.annotations.push({
       id,

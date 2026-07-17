@@ -334,7 +334,7 @@ test("stage screenshots are persisted as meeting materials", () => {
   const captureEnd = mainSource.indexOf('document.addEventListener("click"', captureStart);
   const captureSource = mainSource.slice(captureStart, captureEnd);
   assert.notEqual(captureStart, -1, "the stage screenshot handler must exist");
-  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,1800}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
+  assertSourceIncludes(captureSource, /const\s+meetingId\s*=\s*state\.selectedMeetingId[\s\S]{0,4000}?api\.uploadMaterial\(meetingId,\s*file\)/, "the screenshot PNG must use the meeting material upload API pinned to its meeting");
   assertSourceIncludes(captureSource, /api\.listMaterials\(meetingId\)/, "the pinned meeting material list must refresh after screenshot upload");
   assertSourceIncludes(captureSource, /startUploadProgress\(\s*["']vpbuddy-material["']\s*,\s*file\.name\s*,\s*1\s*\)/, "screenshot upload must use the same prominent VPBuddy material progress contract as manual sending");
   assertSourceExcludes(captureSource, /api\.sendChatAttachment\s*\(/, "a screenshot must not be sent only as a chat attachment");
