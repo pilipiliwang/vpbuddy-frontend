@@ -1,5 +1,9 @@
 import { createVpbuddyApi } from "./api/client.js";
 import { connectAuthenticatedSse, createRealtimeAsrSession } from "./api/realtime.js";
+import {
+  normalizeCollabQuestions as normalizeCollabQuestionPayload,
+  stripAssistantReasoning as normalizeAssistantMarkdown
+} from "./utils/collaboration.js";
 import { filterPersonalKnowledgeDocuments } from "./utils/knowledge.js";
 import { renderMarkdown } from "./utils/markdown.js";
 import { createTranscriptRecordStore, reconcileTranscriptRecords } from "./utils/transcript.js";
@@ -940,11 +944,7 @@ function getDemoPreviewState(deliverable = deliverables.find((item) => canonical
 }
 
 function stripAssistantReasoning(value) {
-  return String(value || "")
-    .replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "")
-    .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
-    .replace(/<\/?think\b[^>]*>/gi, "")
-    .trim();
+  return normalizeAssistantMarkdown(value);
 }
 
 function renderCollabMarkdown(value) {
@@ -952,12 +952,7 @@ function renderCollabMarkdown(value) {
 }
 
 function normalizeCollabQuestions(payload) {
-  const pending = Array.isArray(payload?.pending) ? payload.pending : [];
-  return pending.map((item, index) => ({
-    id: item.qid || `collab-${index + 1}`,
-    time: item.asked_at ? new Date(item.asked_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
-    question: stripAssistantReasoning(item.question)
-  })).filter((item) => item.question);
+  return normalizeCollabQuestionPayload(payload);
 }
 
 function normalizeChatMessage(message) {
