@@ -77,7 +77,7 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
         status: response.status,
         duration_ms: Date.now() - startedAt
       });
-      return { response, auth };
+      return { response, auth, token };
     } catch (error) {
       const requestError = timedOut
         ? Object.assign(new Error(`请求超时（${requestTimeoutMs}ms），请检查后端服务或代理网络`), { code: "ETIMEDOUT" })
@@ -94,7 +94,7 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     }
   }
 
-  async function throwResponseError(response, auth) {
+  async function throwResponseError(response, auth, requestToken) {
     const payload = await readJsonResponse(response);
     const detail = payload?.detail;
     const message = payload?.error
@@ -106,13 +106,16 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     const error = new Error(message);
     error.status = response.status;
     error.payload = payload;
-    if (auth && response.status === 401) onUnauthorized?.(error);
+    const activeToken = auth ? getToken?.() || "" : "";
+    if (auth && response.status === 401 && requestToken && activeToken === requestToken) {
+      onUnauthorized?.(error);
+    }
     throw error;
   }
 
   async function request(path, options = {}) {
-    const { response, auth } = await performRequest(path, options);
-    if (!response.ok) await throwResponseError(response, auth);
+    const { response, auth, token } = await performRequest(path, options);
+    if (!response.ok) await throwResponseError(response, auth, token);
     if (response.status === 204) return null;
     return readJsonResponse(response);
   }
@@ -132,8 +135,8 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
 
   /** @returns {Promise<VpbuddyDownload>} */
   async function requestBlob(path, options = {}) {
-    const { response, auth } = await performRequest(path, options);
-    if (!response.ok) await throwResponseError(response, auth);
+    const { response, auth, token } = await performRequest(path, options);
+    if (!response.ok) await throwResponseError(response, auth, token);
     const blob = typeof response.blob === "function"
       ? await response.blob()
       : new Blob([await response.arrayBuffer()], {

@@ -33,6 +33,7 @@ const state = {
   authBusy: false,
   authError: "",
   authEmail: window.localStorage?.getItem(authEmailKey) || "",
+  authPasswordDraft: "",
   showAccountMenu: false,
   showCreate: false,
   stageTab: "presentation",
@@ -1091,7 +1092,14 @@ function applyAuthenticatedUser(profile = {}) {
 
 function resetAuthenticatedSession(message = "") {
   window.localStorage?.removeItem(authTokenKey);
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toastTimer = 0;
+  if (knowledgeSearchTimer) window.clearTimeout(knowledgeSearchTimer);
+  knowledgeSearchTimer = 0;
   meetingDetailLoadSequence += 1;
+  materialPreviewLoadSequence += 1;
+  meetingMaterialsRevision += 1;
+  vpbuddyChatRequestSequence += 1;
   closeMeetingEvents();
   resetRecordingState();
   clearPresentationPreview();
@@ -1118,15 +1126,28 @@ function resetAuthenticatedSession(message = "") {
   state.view = "login";
   state.authBusy = false;
   state.authError = message;
+  state.authPasswordDraft = "";
+  state.showCreate = false;
+  state.chatBusy = false;
+  state.uploadProgress = null;
+  state.modal = "";
+  state.toast = "";
   state.apiStatus = "idle";
   state.apiMessage = "尚未登录";
   render();
+  window.requestAnimationFrame(() => {
+    const field = document.querySelector(state.authEmail
+      ? "[data-field='auth-password']"
+      : "[data-field='auth-email']");
+    field?.focus();
+  });
 }
 
 async function submitAuthentication() {
   const email = document.querySelector("[data-field='auth-email']")?.value.trim() || "";
-  const password = document.querySelector("[data-field='auth-password']")?.value || "";
+  const password = document.querySelector("[data-field='auth-password']")?.value ?? state.authPasswordDraft;
   state.authEmail = email;
+  state.authPasswordDraft = password;
   state.authError = "";
 
   if (!email || !email.includes("@")) {
@@ -1152,6 +1173,7 @@ async function submitAuthentication() {
     applyAuthenticatedUser(payload);
     state.authBusy = false;
     state.authError = "";
+    state.authPasswordDraft = "";
     state.view = "workspace";
     setApiStatus("connected", "已登录，正在加载会议");
     render();
@@ -2578,7 +2600,7 @@ function renderLogin() {
         </label>
         <label class="field with-icon">
           ${icon("lock")}
-          <input data-field="auth-password" type="password" value="" placeholder="请输入密码（至少 6 位）" autocomplete="${isRegister ? "new-password" : "current-password"}" ${state.authBusy ? "disabled" : ""} />
+          <input data-field="auth-password" type="password" value="${escapeHtml(state.authPasswordDraft)}" placeholder="请输入密码（至少 6 位）" autocomplete="${isRegister ? "new-password" : "current-password"}" ${state.authBusy ? "disabled" : ""} />
         </label>
         <button class="primary wide" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "请稍候…" : isRegister ? "注册并登录" : "登录"}</button>
         <p class="login-note" aria-live="polite">${state.authError ? escapeHtml(state.authError) : "账号由 VPBuddy 后端统一认证。"}</p>
@@ -4132,6 +4154,7 @@ document.addEventListener("click", async (event) => {
 
   if (action === "auth-mode") {
     state.authEmail = document.querySelector("[data-field='auth-email']")?.value.trim() || state.authEmail;
+    state.authPasswordDraft = document.querySelector("[data-field='auth-password']")?.value || state.authPasswordDraft;
     state.authMode = target.dataset.mode === "register" ? "register" : "login";
     state.authError = "";
     render();
@@ -4473,6 +4496,14 @@ document.addEventListener("dblclick", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.matches("[data-field='auth-email']")) {
+    state.authEmail = event.target.value;
+    return;
+  }
+  if (event.target.matches("[data-field='auth-password']")) {
+    state.authPasswordDraft = event.target.value;
+    return;
+  }
   if (event.target.matches(".stage-title-input")) {
     state.meetingTitleDraft = event.target.value;
     return;

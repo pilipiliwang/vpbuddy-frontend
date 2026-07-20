@@ -66,7 +66,11 @@ jobs:
     needs: contract
     runs-on: macos-latest
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
       ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
     steps:
@@ -76,8 +80,47 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - name: Build public macOS packages
-        run: npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false
+      - name: Verify macOS signing credentials
+        shell: bash
+        run: |
+          required=(CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER)
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "Missing required GitHub Actions secrets: ${missing[*]}" >&2
+            echo "Production macOS releases must be Developer ID signed and Apple-notarized." >&2
+            exit 1
+          fi
+      - name: Prepare Apple notarization key
+        shell: bash
+        run: |
+          apple_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$apple_key_path"
+          test -s "$apple_key_path"
+          chmod 600 "$apple_key_path"
+          echo "APPLE_API_KEY=$apple_key_path" >> "$GITHUB_ENV"
+      - name: Build, sign and notarize public macOS packages
+        run: npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false --config.forceCodeSigning=true
+      - name: Verify macOS signatures and notarization tickets
+        shell: bash
+        run: |
+          apps=()
+          while IFS= read -r -d '' app_path; do
+            apps+=("$app_path")
+          done < <(find release -type d -name 'VPBuddy.app' -print0)
+          if [[ ${#apps[@]} -ne 2 ]]; then
+            echo "Expected two architecture-specific VPBuddy.app bundles, found ${#apps[@]}." >&2
+            exit 1
+          fi
+          for app_path in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            spctl --assess --verbose=2 --type execute "$app_path"
+            xcrun stapler validate "$app_path"
+          done
       - name: Stage public macOS assets
         run: node scripts/release-assets.mjs prepare macos release
       - uses: actions/upload-artifact@v4

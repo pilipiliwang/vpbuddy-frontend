@@ -25,6 +25,8 @@ const desktopMain = await readRepositoryFile("desktop/main.cjs");
 const readme = await readRepositoryFile("README.md");
 const releaseNotes = await readRepositoryFile("RELEASE_NOTES.md");
 const workflowSource = await readRepositoryFile(".github/workflows/desktop-build.yml");
+const macEntitlements = await readRepositoryFile("desktop/entitlements.mac.plist");
+const macInheritedEntitlements = await readRepositoryFile("desktop/entitlements.mac.inherit.plist");
 const workflow = yaml.load(workflowSource);
 
 const expectedReleaseAssets = [
@@ -34,7 +36,7 @@ const expectedReleaseAssets = [
   `VPBuddy-${packageJson.version}-mac-x64.dmg`
 ];
 const windowsBuildCommand = "npx --no-install electron-builder --win nsis portable --x64 --publish never --config.nsis.differentialPackage=false";
-const macosBuildCommand = "npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false";
+const macosBuildCommand = "npx --no-install electron-builder --mac dmg --x64 --arm64 --publish never --config.dmg.writeUpdateInfo=false --config.forceCodeSigning=true";
 const windowsStageCommand = "node scripts/release-assets.mjs prepare windows release";
 const macosStageCommand = "node scripts/release-assets.mjs prepare macos release";
 
@@ -100,6 +102,22 @@ test("electron-builder names the four public installers with the package version
   assert.deepEqual(macTargets.dmg, ["x64", "arm64"]);
   assert.equal(PUBLIC_RELEASE_ASSET_COUNT, 4);
   assert.deepEqual(getAllReleaseAssetNames(packageJson.version), expectedReleaseAssets);
+});
+
+test("production macOS packages are signed, hardened, notarized, and microphone-ready", () => {
+  assert.equal(packageJson.build.mac.identity, undefined);
+  assert.equal(packageJson.build.mac.minimumSystemVersion, "12.0");
+  assert.equal(packageJson.build.mac.hardenedRuntime, true);
+  assert.equal(packageJson.build.mac.notarize, true);
+  assert.equal(packageJson.build.mac.entitlements, "desktop/entitlements.mac.plist");
+  assert.equal(packageJson.build.mac.entitlementsInherit, "desktop/entitlements.mac.inherit.plist");
+  assert.match(packageJson.build.mac.extendInfo.NSMicrophoneUsageDescription, /麦克风/);
+
+  for (const plist of [macEntitlements, macInheritedEntitlements]) {
+    assert.match(plist, /com\.apple\.security\.cs\.allow-jit/);
+    assert.match(plist, /com\.apple\.security\.cs\.allow-unsigned-executable-memory/);
+  }
+  assert.match(macEntitlements, /com\.apple\.security\.device\.audio-input/);
 });
 
 test("README and release notes link only the four versioned user downloads", () => {
@@ -193,6 +211,7 @@ test("asset staging publishes exactly four files and ignores builder byproducts"
 test("desktop workflow gates and publishes the exact public asset allowlist", () => {
   assert.deepEqual(workflow.on.push.tags, ["v*"]);
   for (const contractPath of [
+    "desktop/**",
     "README.md",
     "RELEASE_NOTES.md",
     "scripts/release-assets.mjs",
@@ -222,6 +241,22 @@ test("desktop workflow gates and publishes the exact public asset allowlist", ()
   assert.ok(stepRuns(release, "npm run release:verify"));
   assert.equal(actionStep(windows, "actions/upload-artifact@v4").with.path, "release/publish/*");
   assert.equal(actionStep(macos, "actions/upload-artifact@v4").with.path, "release/publish/*");
+
+  assert.equal(macos.env.CSC_LINK, "${{ secrets.MAC_CSC_LINK }}");
+  assert.equal(macos.env.CSC_KEY_PASSWORD, "${{ secrets.MAC_CSC_KEY_PASSWORD }}");
+  assert.equal(macos.env.APPLE_API_KEY_BASE64, "${{ secrets.APPLE_API_KEY_BASE64 }}");
+  assert.equal(macos.env.APPLE_API_KEY_ID, "${{ secrets.APPLE_API_KEY_ID }}");
+  assert.equal(macos.env.APPLE_API_ISSUER, "${{ secrets.APPLE_API_ISSUER }}");
+  assert.equal(macos.env.CSC_IDENTITY_AUTO_DISCOVERY, undefined);
+  assert.match(namedStep(macos, "Verify macOS signing credentials").run, /Missing required GitHub Actions secrets/);
+  const macKeyPreparation = namedStep(macos, "Prepare Apple notarization key").run;
+  assert.match(macKeyPreparation, /APPLE_API_KEY_BASE64/);
+  assert.match(macKeyPreparation, /base64 -D/);
+  assert.match(macKeyPreparation, /APPLE_API_KEY=.*GITHUB_ENV/);
+  const macVerification = namedStep(macos, "Verify macOS signatures and notarization tickets").run;
+  assert.match(macVerification, /codesign --verify --deep --strict/);
+  assert.match(macVerification, /spctl --assess/);
+  assert.match(macVerification, /xcrun stapler validate/);
 
   const releaseMetadata = namedStep(release, "Compose release metadata");
   assert.match(releaseMetadata.run, /TZ=Asia\/Shanghai date '\+%Y-%m-%d'/);

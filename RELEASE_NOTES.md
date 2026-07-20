@@ -1,5 +1,30 @@
 # VPBuddy Releases
 
+## v0.1.4 · 2026-07-21
+
+### Windows
+
+- [Windows 安装版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.4/VPBuddy-Setup-0.1.4-x64.exe)：标准安装程序，可创建桌面和开始菜单快捷方式。
+- [Windows 便携版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.4/VPBuddy-Portable-0.1.4-x64.exe)：无需安装，直接运行。
+
+### macOS
+
+- [Apple Silicon 版（arm64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.4/VPBuddy-0.1.4-mac-arm64.dmg)：适用于 Apple M 系列芯片，要求 macOS 12 或更高版本。
+- [Intel 版（x64）](https://github.com/pilipiliwang/vpbuddy-frontend/releases/download/v0.1.4/VPBuddy-0.1.4-mac-x64.dmg)：适用于 Intel 芯片 Mac，要求 macOS 12 或更高版本。
+
+### 主要更新
+
+- 修复退出登录后仍有旧会话请求返回 401，反复重置登录页并打断邮箱、密码输入的问题。
+- 输入中的登录字段可跨无害重绘保留；登录成功和退出登录会清理密码草稿，不写入本地持久化存储。
+- macOS 安装包不再关闭签名发现，改为 Developer ID 签名、Hardened Runtime、Apple 公证与票据装订。
+- CI 在发布前强制校验 Apple 凭证、应用签名、Gatekeeper 评估和公证票据，任何一步失败都不会发布 DMG。
+- 增加 Electron 运行所需的 macOS 权限配置和麦克风用途说明，明确最低系统版本为 macOS 12。
+
+### 校验
+
+- API 会话竞争、退出登录清理和输入草稿新增自动化回归测试。
+- GitHub Actions 根据 `v0.1.4` tag 构建，并在发布前严格校验版本号、4 个公开资产及 macOS 签名/公证状态。
+
 ## v0.1.3 · 2026-07-18
 
 ### Windows

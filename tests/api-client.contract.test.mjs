@@ -25,6 +25,16 @@ function makeResponse(payload = { ok: true }) {
   };
 }
 
+function makeErrorResponse(status, payload = { error: "unauthorized" }) {
+  return {
+    ok: false,
+    status,
+    async text() {
+      return JSON.stringify(payload);
+    }
+  };
+}
+
 function makeHarness(token = jwt) {
   const calls = [];
   const transport = async (url, options = {}) => {
@@ -98,6 +108,47 @@ test("account authentication uses the backend email/password routes", async () =
   assertRequest(register, "POST", "/api/auth/register");
   assert.deepEqual(JSON.parse(register.options.body), credentials);
   assert.equal(headerValue(register.options.headers, "authorization"), undefined);
+});
+
+test("a late 401 from an old session cannot log out a newer session", async () => {
+  let activeToken = "session-old";
+  let resolveTransport;
+  let unauthorizedCount = 0;
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => activeToken,
+    onUnauthorized: () => {
+      unauthorizedCount += 1;
+    },
+    timeoutMs: 0,
+    transport: async () => new Promise((resolve) => {
+      resolveTransport = resolve;
+    })
+  });
+
+  const staleRequest = api.me();
+  await Promise.resolve();
+  activeToken = "session-new";
+  resolveTransport(makeErrorResponse(401));
+
+  await assert.rejects(staleRequest, (error) => error?.status === 401);
+  assert.equal(unauthorizedCount, 0);
+});
+
+test("a 401 for the active session still triggers session reset", async () => {
+  let unauthorizedCount = 0;
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => jwt,
+    onUnauthorized: () => {
+      unauthorizedCount += 1;
+    },
+    timeoutMs: 0,
+    transport: async () => makeErrorResponse(401)
+  });
+
+  await assert.rejects(api.me(), (error) => error?.status === 401);
+  assert.equal(unauthorizedCount, 1);
 });
 
 test("API diagnostics report request health without leaking query values", async () => {
