@@ -2,12 +2,17 @@
   "name": "vpbuddy-frontend",
   "version": "0.1.4",
   "private": true,
-  "description": "VPBuddy desktop shell and frontend",
+  "description": "VPBuddy web application and desktop shell",
   "type": "module",
   "main": "desktop/main.cjs",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
+    "web": "node server.mjs",
+    "test:web": "node --test tests/web-runtime.contract.test.mjs",
     "test": "node --test",
     "test:release-contract": "node --test tests/release-integrity.contract.test.mjs",
     "desktop": "electron .",
@@ -21,6 +26,7 @@
   },
   "dependencies": {
     "html2canvas": "1.4.1",
+    "http-proxy": "^1.18.1",
     "pdfjs-dist": "5.4.624"
   },
   "devDependencies": {

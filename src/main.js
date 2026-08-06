@@ -12,7 +12,10 @@ import { createZipBlob } from "./utils/zip.js";
 
 const app = document.querySelector("#app");
 const defaultApiBaseUrl = "http://47.100.182.3:28765";
-const apiBaseUrl = window.localStorage?.getItem("vpbuddy.apiBaseUrl") || window.VPBUDDY_API_BASE_URL || defaultApiBaseUrl;
+const configuredApiBaseUrl = window.VPBUDDY_RUNTIME_API_BASE_URL || window.VPBUDDY_API_BASE_URL || defaultApiBaseUrl;
+const apiBaseUrl = window.VPBUDDY_API_BASE_LOCKED
+  ? configuredApiBaseUrl
+  : window.localStorage?.getItem("vpbuddy.apiBaseUrl") || configuredApiBaseUrl;
 const authTokenKey = "vpbuddy.authToken";
 const authEmailKey = "vpbuddy.authEmail";
 const meetingStatusStorageKey = "vpbuddy.meetingStatuses";
