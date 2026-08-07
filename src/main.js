@@ -20,6 +20,7 @@ const authTokenKey = "vpbuddy.authToken";
 const authEmailKey = "vpbuddy.authEmail";
 const meetingStatusStorageKey = "vpbuddy.meetingStatuses";
 const getAuthToken = () => window.localStorage?.getItem(authTokenKey) || "";
+const webLandingEnabled = Boolean(window.VPBUDDY_WEB);
 const clientLogEntries = [];
 const maxClientLogEntries = 500;
 const meetingStatusCache = readMeetingStatusCache();
@@ -31,7 +32,7 @@ const api = createVpbuddyApi({
 });
 
 const state = {
-  view: "login",
+  view: webLandingEnabled && window.location.hash !== "#login" ? "landing" : "login",
   authMode: "login",
   authBusy: false,
   authError: "",
@@ -511,6 +512,7 @@ function updateAppMarkup(nextMarkup) {
 
 function render() {
   const views = {
+    landing: renderLanding,
     login: renderLogin,
     workspace: renderWorkspace,
     meeting: renderMeetingStage,
@@ -2570,6 +2572,203 @@ async function deleteKnowledgeDocument(id) {
   render();
 }
 
+function renderLanding() {
+  const deliverableItems = [
+    ["D", "交互 Demo", "把讨论快速转成可演示、可迭代的产品界面。"],
+    ["需", "需求文档", "保留目标、范围、约束与验收依据。"],
+    ["架", "架构文档", "沉淀系统边界、模块关系与技术决策。"],
+    ["任", "任务拆解", "把会议共识转成清晰的执行项。"],
+    ["API", "API 设计", "同步接口契约，减少前后端理解偏差。"],
+    ["险", "风险分析", "持续识别未决事项、依赖与交付风险。"]
+  ];
+  return `
+    <main class="landing-page">
+      <header class="landing-nav" aria-label="官网导航">
+        <a class="landing-brand" href="#landing-top" aria-label="VPBuddy 首页">${logo(true)}</a>
+        <nav>
+          <a href="#landing-workflow">协同流程</a>
+          <a href="#landing-product">产品界面</a>
+          <a href="#landing-deliverables">交付成果</a>
+          <a href="#landing-boundary">数据边界</a>
+          <a href="#landing-contact">联系我们</a>
+        </nav>
+        <button class="primary landing-nav-cta" data-action="start-trial">立即试用${icon("arrowRight", 18)}</button>
+      </header>
+
+      <section class="landing-hero" id="landing-top">
+        <div class="landing-hero-copy">
+          <p class="landing-kicker"><i></i>AI 会议协同与交付生成系统 <em>WEB + DESKTOP</em></p>
+          <h1>VPBuddy</h1>
+          <h2>让每一次会议，都向可交付成果推进</h2>
+          <p class="landing-lead">从实时记录、材料投屏和 Agent 协同，到 Demo、需求、架构、任务与接口，会议上下文在同一个空间里持续沉淀。</p>
+          <div class="landing-actions">
+            <button class="primary" data-action="start-trial">立即试用${icon("arrowRight", 20)}</button>
+            <a class="ghost" href="#landing-product">查看产品界面${icon("monitor", 20)}</a>
+          </div>
+          <div class="landing-proof" aria-label="核心能力">
+            <span>${icon("mic", 19)}实时转写</span>
+            <span>${icon("sparkle", 19)}Agent 协同</span>
+            <span>${icon("monitor", 19)}材料投屏</span>
+            <span>${icon("file", 19)}持续交付</span>
+          </div>
+        </div>
+        <figure class="landing-hero-preview">
+          <div class="landing-window-bar" aria-hidden="true">
+            <span></span><span></span><span></span>
+            <b>VPBuddy 会议空间</b>
+            <i>实时协同中</i>
+          </div>
+          <div class="landing-hero-image">
+            <img src="./assets/hero-collaboration.png" alt="VPBuddy 通用 AI 会议协同与交付工作空间" />
+            <div class="landing-hero-slide-copy">
+              <strong>AI 会议协同工作空间</strong>
+              <span>实时记录 · 材料理解 · Agent 协同 · 持续交付</span>
+            </div>
+          </div>
+          <figcaption><span class="status-dot"></span>会议信息、材料与交付成果保持在同一条工作链路中</figcaption>
+        </figure>
+      </section>
+
+      <section class="landing-facts" aria-label="产品信息">
+        <article><strong>01</strong><div><b>一个会议空间</b><span>记录、材料、对话与成果集中承接</span></div></article>
+        <article><strong>06</strong><div><b>六类交付成果</b><span>Demo 与结构化文档持续生成</span></div></article>
+        <article><strong>02</strong><div><b>网页端与客户端</b><span>共用账号、数据与后端接口</span></div></article>
+      </section>
+
+      <section class="landing-workflow" id="landing-workflow">
+        <div class="landing-section-heading dark-text">
+          <b class="landing-section-index">01 / 协同流程</b>
+          <p>工作方式</p>
+          <h2>不只记录会议，更推动交付发生</h2>
+          <span>VPBuddy 围绕真实会议上下文组织协同，让信息从“被听见”走向“可执行”。</span>
+        </div>
+        <div class="landing-workflow-grid">
+          <article>
+            <b>01</b>
+            <div class="landing-step-icon blue">${icon("mic", 26)}</div>
+            <h3>理解现场</h3>
+            <p>记录时间与转写内容，聚合本次会议材料，让讨论始终有上下文。</p>
+          </article>
+          <article>
+            <b>02</b>
+            <div class="landing-step-icon green">${icon("sparkle", 26)}</div>
+            <h3>协同追问</h3>
+            <p>Agent 持续理解讨论进展，识别缺口、依赖和需要进一步确认的问题。</p>
+          </article>
+          <article>
+            <b>03</b>
+            <div class="landing-step-icon orange">${icon("file", 26)}</div>
+            <h3>形成交付</h3>
+            <p>把共识同步沉淀为 Demo 与结构化文档，并在后续会议中持续迭代。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="landing-product" id="landing-product">
+        <div class="landing-product-inner">
+          <div class="landing-section-heading">
+            <b class="landing-section-index">02 / 产品界面</b>
+            <p>产品界面</p>
+            <h2>会议过程与交付结果，清晰可见</h2>
+            <span>一边承接现场信息，一边查看 Agent 协同和正在生成的成果，不需要在多个工具之间来回切换。</span>
+          </div>
+          <div class="landing-product-showcase">
+            <figure class="landing-product-main">
+              <img src="./assets/product-delivery-dashboard.png" alt="VPBuddy 生成的通用项目协同与交付 Dashboard Demo" />
+              <figcaption>
+                <strong>交互 Demo</strong>
+                <span>从会议上下文生成，并按版本持续迭代</span>
+              </figcaption>
+            </figure>
+            <div class="landing-product-notes">
+              <article>
+                ${icon("monitor", 24)}
+                <h3>投屏与批注</h3>
+                <p>会议材料在同一画布中浏览、批注与截屏，保留讨论证据。</p>
+              </article>
+              <article>
+                ${icon("book", 24)}
+                <h3>个人知识索引</h3>
+                <p>知识库属于个人账号，可跨会议检索；会议材料只服务当前会议。</p>
+              </article>
+              <article>
+                ${icon("send", 24)}
+                <h3>连续对话</h3>
+                <p>向 VPBuddy 补充问题、说明与材料，推动成果继续收敛。</p>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="landing-deliverables" id="landing-deliverables">
+        <div class="landing-section-heading dark-text">
+          <b class="landing-section-index">03 / 交付成果</b>
+          <p>交付成果</p>
+          <h2>六类成果，共享同一份会议上下文</h2>
+          <span>不再把文档视为会后的额外劳动，而是在讨论过程中逐步形成、同步更新。</span>
+        </div>
+        <div class="landing-deliverable-grid">
+          ${deliverableItems.map(([mark, title, description], index) => `
+            <article class="landing-deliverable-item item-${index + 1}">
+              <i>${mark}</i>
+              <h3>${title}</h3>
+              <p>${description}</p>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+
+      <section class="landing-boundary" id="landing-boundary">
+        <div class="landing-section-heading">
+          <b class="landing-section-index">04 / 数据边界</b>
+          <p>数据边界</p>
+          <h2>每类信息，都回到正确的位置</h2>
+        </div>
+        <div class="landing-boundary-grid">
+          <article><span>01</span><h3>会议材料</h3><p>与具体会议绑定，由会议材料接口保存和返回。</p></article>
+          <article><span>02</span><h3>个人知识库</h3><p>与用户账号绑定，可在用户的不同会议中检索调用。</p></article>
+          <article><span>03</span><h3>统一认证</h3><p>网页端与桌面客户端使用同一套邮箱、密码和接口凭证。</p></article>
+        </div>
+      </section>
+
+      <section class="landing-contact" id="landing-contact">
+        <div class="landing-contact-copy">
+          <b class="landing-section-index">05 / 联系我们</b>
+          <p>联系我们</p>
+          <h2>聊聊你的下一场会议，<br />可以怎样更快走向交付</h2>
+          <span>无论是产品试用、部署方式还是项目建议，都可以从这里开始。</span>
+          <div class="landing-contact-direct">
+            <a class="landing-contact-qr" href="./assets/contact-wechat-qr.png" target="_blank" rel="noreferrer" aria-label="查看微信联系二维码">
+              <img src="./assets/contact-wechat-qr.png" alt="VPBuddy 微信联系二维码" />
+            </a>
+            <div class="landing-contact-phone">
+              <small>联系人电话</small>
+              <a href="tel:15312065105">153 1206 5105</a>
+              <p>产品试用、部署咨询与合作沟通</p>
+            </div>
+          </div>
+        </div>
+        <div class="landing-contact-options">
+          <article>
+            <div class="landing-contact-icon">${icon("sparkle", 25)}</div>
+            <small>产品试用</small>
+            <h3>亲自进入 VPBuddy</h3>
+            <p>使用现有邮箱账号登录，直接体验完整会议协同与交付流程。</p>
+            <button class="primary" data-action="start-trial">立即试用${icon("arrowRight", 18)}</button>
+          </article>
+        </div>
+      </section>
+
+      <footer class="landing-footer">
+        ${logo(true)}
+        <p>AI 会议协同与交付生成系统</p>
+        <button data-action="start-trial">登录 / 注册</button>
+      </footer>
+    </main>
+  `;
+}
+
 function renderLogin() {
   const isRegister = state.authMode === "register";
   return `
@@ -2589,6 +2788,7 @@ function renderLogin() {
       </section>
       <section class="login-card panel">
         <header class="login-card-head">
+          ${webLandingEnabled ? `<button class="login-home-link" data-action="show-landing">${icon("arrowLeft", 17)}返回首页</button>` : ""}
           <span>测试版</span>
           <h2>${isRegister ? "注册账号" : "账号登录"}</h2>
           <p>使用邮箱和密码${isRegister ? "创建 VPBuddy 账号" : "进入 VPBuddy"}。</p>
@@ -4155,6 +4355,24 @@ document.addEventListener("click", async (event) => {
   }
   state.showAccountMenu = false;
 
+  if (action === "start-trial") {
+    state.view = "login";
+    state.authError = "";
+    window.history.pushState({ vpbuddyView: "login" }, "", "#login");
+    render();
+    window.scrollTo(0, 0);
+    if (getAuthToken()) await restoreAuthenticatedSession();
+    return;
+  }
+  if (action === "show-landing" && webLandingEnabled) {
+    state.view = "landing";
+    state.authError = "";
+    window.history.pushState({ vpbuddyView: "landing" }, "", `${window.location.pathname}${window.location.search}`);
+    render();
+    window.scrollTo(0, 0);
+    return;
+  }
+
   if (action === "auth-mode") {
     state.authEmail = document.querySelector("[data-field='auth-email']")?.value.trim() || state.authEmail;
     state.authPasswordDraft = document.querySelector("[data-field='auth-password']")?.value || state.authPasswordDraft;
@@ -4853,5 +5071,13 @@ document.addEventListener("pointerup", () => {
 
 window.addEventListener("resize", updateAnnotationViewport);
 
+window.addEventListener("popstate", () => {
+  if (!webLandingEnabled) return;
+  state.view = window.location.hash === "#login" ? "login" : "landing";
+  state.authError = "";
+  render();
+  if (state.view === "login" && getAuthToken()) void restoreAuthenticatedSession();
+});
+
 render();
-void restoreAuthenticatedSession();
+if (state.view !== "landing") void restoreAuthenticatedSession();

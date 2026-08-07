@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { dirname, resolve } from "node:path";
@@ -205,4 +206,31 @@ test("only the existing backend route families are proxied", () => {
   assert.equal(isProxyPath("/docs/id/demo.html"), true);
   assert.equal(isProxyPath("/apiary"), false);
   assert.equal(isProxyPath("/package.json"), false);
+});
+
+test("the browser starts on a marketing page while desktop authentication remains unchanged", async () => {
+  const [mainSource, stylesSource] = await Promise.all([
+    readFile(resolve(repoRoot, "src/main.js"), "utf8"),
+    readFile(resolve(repoRoot, "src/styles.css"), "utf8")
+  ]);
+
+  assert.match(mainSource, /const webLandingEnabled = Boolean\(window\.VPBUDDY_WEB\)/);
+  assert.match(mainSource, /view: webLandingEnabled && window\.location\.hash !== "#login" \? "landing" : "login"/);
+  assert.match(mainSource, /function renderLanding\(\)/);
+  assert.match(mainSource, /data-action="start-trial"/);
+  assert.match(mainSource, /assets\/hero-collaboration\.png/);
+  assert.match(mainSource, /assets\/product-delivery-dashboard\.png/);
+  assert.doesNotMatch(mainSource, /VPBuddy 会议投屏中的 ESG 解决方案页面/);
+  assert.match(mainSource, /id="landing-contact"/);
+  assert.match(mainSource, /aria-label="查看微信联系二维码"/);
+  assert.match(mainSource, /assets\/contact-wechat-qr\.png/);
+  assert.match(mainSource, /href="tel:15312065105"/);
+  assert.doesNotMatch(mainSource, /通过 GitHub 联系项目/);
+  assert.doesNotMatch(mainSource, /class="landing-final-cta"/);
+  assert.match(mainSource, /action === "start-trial"[\s\S]{0,220}?state\.view = "login"/);
+  assert.match(mainSource, /webLandingEnabled \? `<button class="login-home-link"/);
+  assert.match(stylesSource, /\.landing-hero\s*\{/);
+  assert.match(stylesSource, /\.landing-contact\s*\{/);
+  assert.match(stylesSource, /url\("\.\.\/assets\/login-cityline\.png"\)/);
+  assert.match(stylesSource, /@media \(max-width: 680px\)[\s\S]*?\.landing-hero/);
 });
