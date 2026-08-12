@@ -233,10 +233,14 @@ test("the browser starts on a marketing page while desktop authentication remain
   assert.match(mainSource, /href="tel:15312065105"/);
   assert.doesNotMatch(mainSource, /通过 GitHub 联系项目/);
   assert.doesNotMatch(mainSource, /class="landing-final-cta"/);
+  assert.match(mainSource, /上海维睿塔数字科技有限公司/);
+  assert.match(mainSource, /沪ICP备2024089319号-5/);
+  assert.match(mainSource, /href="https:\/\/beian\.miit\.gov\.cn\/"/);
   assert.match(mainSource, /action === "start-trial"[\s\S]{0,220}?state\.view = "login"/);
   assert.match(mainSource, /webLandingEnabled \? `<button class="login-home-link"/);
   assert.match(stylesSource, /\.landing-hero\s*\{/);
   assert.match(stylesSource, /\.landing-contact\s*\{/);
+  assert.match(stylesSource, /\.landing-footer-compliance\s*\{/);
   assert.match(stylesSource, /url\("\.\.\/assets\/login-cityline\.png"\)/);
   assert.match(stylesSource, /@media \(max-width: 680px\)[\s\S]*?\.landing-hero/);
 });
