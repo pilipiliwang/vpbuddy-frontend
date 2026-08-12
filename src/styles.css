@@ -1165,7 +1165,34 @@ textarea::placeholder {
 }
 
 .landing-footer p {
+  margin: 0;
   color: #8292ad;
+}
+
+.landing-footer-meta {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.landing-footer-compliance {
+  display: flex;
+  align-items: center;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  color: #657693;
+  font-size: 13px;
+}
+
+.landing-footer-compliance a {
+  color: #8292ad;
+  text-decoration: none;
+  transition: color 160ms ease;
+}
+
+.landing-footer-compliance a:hover,
+.landing-footer-compliance a:focus-visible {
+  color: #4b9dff;
 }
 
 .landing-footer > button {
@@ -6745,10 +6772,9 @@ body.stage-fullscreen-active {
     grid-template-columns: 1fr auto;
   }
 
-  .landing-footer p {
+  .landing-footer-meta {
     grid-column: 1 / -1;
     grid-row: 2;
-    margin: 0;
   }
 
   .login-copy h1 {

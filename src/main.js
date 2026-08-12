@@ -2762,7 +2762,13 @@ function renderLanding() {
 
       <footer class="landing-footer">
         ${logo(true)}
-        <p>AI 会议协同与交付生成系统</p>
+        <div class="landing-footer-meta">
+          <p>AI 会议协同与交付生成系统</p>
+          <div class="landing-footer-compliance" aria-label="网站备案信息">
+            <span>上海维睿塔数字科技有限公司</span>
+            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">沪ICP备2024089319号-5</a>
+          </div>
+        </div>
         <button data-action="start-trial">登录 / 注册</button>
       </footer>
     </main>
