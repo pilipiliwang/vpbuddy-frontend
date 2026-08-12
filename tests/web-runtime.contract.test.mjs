@@ -121,7 +121,7 @@ test("web runtime serves the unchanged UI with same-origin API configuration", a
   const config = await fetch(`${fixture.origin}/desktop-config.js`);
   const script = await config.text();
   assert.equal(config.status, 200);
-  assert.match(script, /window\.VPBUDDY_RUNTIME_API_BASE_URL = window\.location\.origin/);
+  assert.match(script, /window\.VPBUDDY_RUNTIME_API_BASE_URL = window\.location\.origin \+ "\/vpbuddy"/);
   assert.match(script, /window\.VPBUDDY_API_BASE_LOCKED = true/);
   assert.match(script, /window\.VPBUDDY_WEB = true/);
   assert.doesNotMatch(script, /47\.100\.182\.3/);
@@ -145,7 +145,7 @@ test("HTTP, upload-style bodies and non-api backend paths remain byte-compatible
   t.after(() => fixture.close());
 
   const payload = "raw-upload-body";
-  const response = await fetch(`${fixture.origin}/api/meetings/m-1/materials?source=web`, {
+  const response = await fetch(`${fixture.origin}/vpbuddy/api/meetings/m-1/materials?source=web`, {
     method: "POST",
     headers: {
       Authorization: "Bearer frontend-token",
@@ -161,8 +161,8 @@ test("HTTP, upload-style bodies and non-api backend paths remain byte-compatible
     body: payload
   });
 
-  await fetch(`${fixture.origin}/meetings/m-1/recording/start`, { method: "POST" });
-  await fetch(`${fixture.origin}/docs/m-1/demo.html?v=V2`);
+  await fetch(`${fixture.origin}/vpbuddy/meetings/m-1/recording/start`, { method: "POST" });
+  await fetch(`${fixture.origin}/vpbuddy/docs/m-1/demo.html?v=V2`);
   assert.deepEqual(
     fixture.requests.map((entry) => entry.url),
     [
@@ -177,7 +177,7 @@ test("SSE responses stream through the web proxy without buffering metadata", as
   const fixture = await createFixture();
   t.after(() => fixture.close());
 
-  const response = await fetch(`${fixture.origin}/api/events`);
+  const response = await fetch(`${fixture.origin}/vpbuddy/api/events`);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /^text\/event-stream/);
   assert.equal(response.headers.get("x-accel-buffering"), "no");
@@ -192,7 +192,7 @@ test("realtime ASR WebSocket upgrades preserve path, query and authorization", a
   t.after(() => fixture.close());
   const webPort = Number(new URL(fixture.origin).port);
 
-  const response = await rawUpgrade(webPort, "/api/meetings/m-1/realtime_asr?token=query-token");
+  const response = await rawUpgrade(webPort, "/vpbuddy/api/meetings/m-1/realtime_asr?token=query-token");
   assert.match(response, /^HTTP\/1\.1 101 Switching Protocols/m);
   assert.deepEqual(fixture.upgrades, [{
     url: "/api/meetings/m-1/realtime_asr?token=query-token",
@@ -201,10 +201,12 @@ test("realtime ASR WebSocket upgrades preserve path, query and authorization", a
 });
 
 test("only the existing backend route families are proxied", () => {
-  assert.equal(isProxyPath("/api/auth/me"), true);
-  assert.equal(isProxyPath("/meetings/id/recording/start"), true);
-  assert.equal(isProxyPath("/docs/id/demo.html"), true);
+  assert.equal(isProxyPath("/vpbuddy/api/auth/me"), true);
+  assert.equal(isProxyPath("/vpbuddy/meetings/id/recording/start"), true);
+  assert.equal(isProxyPath("/vpbuddy/docs/id/demo.html"), true);
+  assert.equal(isProxyPath("/api/auth/me"), false);
   assert.equal(isProxyPath("/apiary"), false);
+  assert.equal(isProxyPath("/vpbuddy/apiary"), false);
   assert.equal(isProxyPath("/package.json"), false);
 });
 

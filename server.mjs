@@ -7,7 +7,8 @@ import httpProxy from "http-proxy";
 const modulePath = fileURLToPath(import.meta.url);
 const defaultRoot = dirname(modulePath);
 const defaultBackendUrl = "http://47.100.182.3:28765";
-const proxyPrefixes = ["/api", "/meetings", "/docs"];
+const webProxyMount = "/vpbuddy";
+const backendProxyPrefixes = ["/api", "/meetings", "/docs"];
 const staticPrefixes = [
   "/src/",
   "/assets/",
@@ -47,7 +48,17 @@ function isInsideRoot(root, target) {
 }
 
 export function isProxyPath(pathname = "") {
-  return proxyPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+  if (pathname !== webProxyMount && !pathname.startsWith(`${webProxyMount}/`)) return false;
+  const backendPath = pathname.slice(webProxyMount.length) || "/";
+  return backendProxyPrefixes.some((prefix) => backendPath === prefix || backendPath.startsWith(`${prefix}/`));
+}
+
+function stripWebProxyMount(req) {
+  const rawUrl = String(req.url || "/");
+  const queryIndex = rawUrl.indexOf("?");
+  const pathname = queryIndex >= 0 ? rawUrl.slice(0, queryIndex) : rawUrl;
+  const query = queryIndex >= 0 ? rawUrl.slice(queryIndex) : "";
+  req.url = `${pathname.slice(webProxyMount.length) || "/"}${query}`;
 }
 
 function isAllowedStaticPath(pathname) {
@@ -100,7 +111,7 @@ function sendJson(res, status, payload) {
 function runtimeConfigScript(publicApiBaseUrl) {
   const runtimeApiExpression = publicApiBaseUrl
     ? JSON.stringify(publicApiBaseUrl)
-    : "window.location.origin";
+    : `window.location.origin + ${JSON.stringify(webProxyMount)}`;
   return [
     `window.VPBUDDY_RUNTIME_API_BASE_URL = ${runtimeApiExpression};`,
     "window.VPBUDDY_API_BASE_URL = window.VPBUDDY_RUNTIME_API_BASE_URL;",
@@ -198,6 +209,7 @@ export function createVpbuddyWebServer({
     }
 
     if (isProxyPath(pathname)) {
+      stripWebProxyMount(req);
       proxy.web(req, res);
       return;
     }
@@ -233,6 +245,7 @@ export function createVpbuddyWebServer({
       writeUpgradeError(socket, 404, "WebSocket route not found");
       return;
     }
+    stripWebProxyMount(req);
     proxy.ws(req, socket, head);
   });
 

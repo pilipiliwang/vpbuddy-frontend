@@ -8,9 +8,9 @@
 Browser (HTTPS)
   -> VPBuddy Web server
        -> static UI
-       -> /api/*       -> existing backend HTTP API
-       -> /meetings/*  -> existing recording API
-       -> /docs/*      -> existing document preview API
+       -> /vpbuddy/api/*       -> existing backend /api/* HTTP API
+       -> /vpbuddy/meetings/*  -> existing backend /meetings/* recording API
+       -> /vpbuddy/docs/*      -> existing backend /docs/* document preview API
        -> WebSocket    -> existing realtime ASR endpoint
 ```
 
