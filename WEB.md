@@ -8,13 +8,15 @@
 Browser (HTTPS)
   -> VPBuddy Web server
        -> static UI
-       -> /api/*       -> existing backend HTTP API
-       -> /meetings/*  -> existing recording API
-       -> /docs/*      -> existing document preview API
+       -> /vpbuddy/api/*       -> existing backend /api/* HTTP API
+       -> /vpbuddy/meetings/*  -> existing backend /meetings/* recording API
+       -> /vpbuddy/docs/*      -> existing backend /docs/* document preview API
        -> WebSocket    -> existing realtime ASR endpoint
 ```
 
 网页端默认使用同源代理。接口路径、HTTP 方法、请求体、Bearer 凭证、SSE 数据和 WebSocket 查询参数都不做业务转换。
+
+当外层 Nginx 以 `/vpbuddy/` 子路径发布网页并在转发时移除该前缀，Web 服务也会兼容收到的 `/api/*`、`/meetings/*` 和 `/docs/*` 内部路径；浏览器侧公开请求仍统一使用 `/vpbuddy/*`。
 
 ## 本地运行
 

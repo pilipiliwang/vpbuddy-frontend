@@ -11,7 +11,9 @@ npm ci
 npm run web
 ```
 
-浏览器打开 `http://127.0.0.1:4173`。完整部署、HTTPS、Docker 和环境变量说明见 [WEB.md](./WEB.md)。
+公网 Web 版：[https://www.autoflatype.com/vpbuddy/](https://www.autoflatype.com/vpbuddy/)
+
+本地开发时浏览器打开 `http://127.0.0.1:4173`。完整部署、HTTPS、Docker 和环境变量说明见 [WEB.md](./WEB.md)。
 
 ## 下载安装包
 
