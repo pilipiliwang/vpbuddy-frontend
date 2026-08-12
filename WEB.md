@@ -16,6 +16,8 @@ Browser (HTTPS)
 
 网页端默认使用同源代理。接口路径、HTTP 方法、请求体、Bearer 凭证、SSE 数据和 WebSocket 查询参数都不做业务转换。
 
+当外层 Nginx 以 `/vpbuddy/` 子路径发布网页并在转发时移除该前缀，Web 服务也会兼容收到的 `/api/*`、`/meetings/*` 和 `/docs/*` 内部路径；浏览器侧公开请求仍统一使用 `/vpbuddy/*`。
+
 ## 本地运行
 
 要求 Node.js 20 或更高版本。

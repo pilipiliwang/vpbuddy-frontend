@@ -48,8 +48,9 @@ function isInsideRoot(root, target) {
 }
 
 export function isProxyPath(pathname = "") {
-  if (pathname !== webProxyMount && !pathname.startsWith(`${webProxyMount}/`)) return false;
-  const backendPath = pathname.slice(webProxyMount.length) || "/";
+  const backendPath = pathname.startsWith(`${webProxyMount}/`)
+    ? pathname.slice(webProxyMount.length)
+    : pathname;
   return backendProxyPrefixes.some((prefix) => backendPath === prefix || backendPath.startsWith(`${prefix}/`));
 }
 
@@ -58,6 +59,7 @@ function stripWebProxyMount(req) {
   const queryIndex = rawUrl.indexOf("?");
   const pathname = queryIndex >= 0 ? rawUrl.slice(0, queryIndex) : rawUrl;
   const query = queryIndex >= 0 ? rawUrl.slice(queryIndex) : "";
+  if (!pathname.startsWith(`${webProxyMount}/`)) return;
   req.url = `${pathname.slice(webProxyMount.length) || "/"}${query}`;
 }
 
