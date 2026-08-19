@@ -2,6 +2,16 @@
 
 审计日期：2026-07-13
 
+安全增量复核：2026-08-19
+
+## 0. 2026-08-19 Demo owner 鉴权增量
+
+- 前端已改用 `GET /api/meetings/{meeting_id}/demo/versions/{version}/content`，通过现有 Bearer 会话读取 HTML，再以临时 Blob URL 渲染不含 `allow-same-origin` 的沙箱 iframe。
+- 前端已取消 Web 运行时对公开 `/docs` 路径的代理，且不会在鉴权接口失败时回退。
+- 版本快速切换使用 AbortController 和请求序号隔离，旧响应不能覆盖新版本；切会、退出、离开预览或关闭页面时会释放 Blob URL。
+- 后端配合事项见 `aotocode2026/vpbuddy#12`：发布 owner 校验内容接口、统一 401/403/404、返回安全响应头，并在前端切换后删除公开 `/docs` 静态挂载。
+- 后端安全实现参考分支 commit `eb73a47`；在该接口部署到目标环境前，前端会显示明确的 404/加载失败状态，不会降级到不安全预览。
+
 ## 1. 审计范围与判定口径
 
 ### 1.1 事实源

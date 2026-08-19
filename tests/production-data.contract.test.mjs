@@ -128,7 +128,13 @@ test("only Demo exposes backend version switching", () => {
   assertSourceIncludes(mainSource, /class=["']demo-version-select["']/, "Demo must expose its backend version selector");
   assertSourceIncludes(mainSource, /matches\(["']\.demo-version-select["']\)[\s\S]{0,260}?selectedDemoVersion/, "changing the Demo selector must update the selected Demo version");
   assertSourceIncludes(canvasSource, /getSelectedDemoVersion\(\)\s*\|\|\s*demoVersions\[0\]/, "a pinned Demo version must win over the latest manifest fallback");
-  assertSourceIncludes(canvasSource, /selectedDemo\?\.file\s*\|\|\s*["']demo_latest\.html["']/, "the Demo iframe must use the selected manifest file with a latest fallback");
+  assertSourceIncludes(mainSource, /api\.getDemoVersionContent\s*\(/, "Demo preview content must use the owner-authenticated backend endpoint");
+  assertSourceIncludes(mainSource, /URL\.createObjectURL\s*\(\s*new Blob/, "authenticated Demo HTML must be rendered from a local Blob URL");
+  assertSourceIncludes(mainSource, /new AbortController\s*\(/, "rapid Demo version changes must cancel stale content requests");
+  assertSourceIncludes(mainSource, /URL\.revokeObjectURL\s*\(/, "Demo Blob URLs must be released when the preview changes or closes");
+  assertSourceIncludes(mainSource, /sandbox=["']allow-scripts allow-forms allow-modals["']/, "Demo HTML must run in an opaque-origin sandbox");
+  assertSourceExcludes(mainSource, /sandbox=["'][^"']*allow-same-origin/, "generated Demo HTML must not receive same-origin access to the VPBuddy app");
+  assertSourceExcludes(mainSource, /\/docs\/\$\{encodeURIComponent\(state\.selectedMeetingId\)/, "Demo preview must never fall back to the public /docs path");
   assertSourceExcludes(mainSource, /class=["']deliverable-version-select["']/, "the five text deliverables must not expose a shared version selector");
   assertSourceExcludes(mainSource, /renderUnifiedDeliverableVersionControl/, "the obsolete six-document unified version control must be removed");
 });

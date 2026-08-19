@@ -52,6 +52,14 @@
 - `GET /deliverables/:id/versions`：交付物版本列表
 - `PATCH /deliverables/:id/version`：切换当前版本
 
+### 当前后端 Demo 安全预览
+
+- `GET /api/meetings/:id/demo/versions`：读取当前用户拥有会议的 Demo 版本清单。
+- `GET /api/meetings/:id/demo/versions/:version/content`：以 `Authorization: Bearer <token>` 读取指定版本 HTML；前端将正文转换为临时 Blob URL 后放入不含 `allow-same-origin` 的沙箱 iframe，不在 URL、日志或 DOM 属性中暴露 JWT。
+- 预期状态码：未登录 `401`、非会议 owner `403`、会议或版本不存在 `404`。
+- 正文响应应为 `text/html; charset=utf-8`，并携带 `Cache-Control: private, no-store` 与 `X-Content-Type-Options: nosniff`。
+- 前端不再访问或代理公开 `/docs/:meeting_id/:file` 路径，也不会在鉴权接口失败时回退到该路径。
+
 ## Knowledge
 
 - `GET /knowledge?scope=personal|enterprise|industry`：知识库列表

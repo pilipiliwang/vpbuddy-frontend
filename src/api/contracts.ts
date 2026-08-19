@@ -567,6 +567,7 @@ export type CurrentBackendRoute =
   | "GET /api/meetings/:id/docs/:kind"
   | "GET /api/meetings/:id/docs/:kind/download"
   | "GET /api/meetings/:id/demo/versions"
+  | "GET /api/meetings/:id/demo/versions/:version/content"
   | "GET /api/kb/list"
   | "POST /api/kb/search"
   | "POST /api/kb/upload"
@@ -635,6 +636,7 @@ export interface CurrentBackendApi {
   downloadDeliverable(meetingId: ID, kind: DocKind): Promise<VpbuddyDownload>;
   listDemoVersions(meetingId: ID): Promise<DemoVersionsResponse>;
   getDemoVersions(meetingId: ID): Promise<DemoVersionsResponse>;
+  getDemoVersionContent(meetingId: ID, version: number, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<string>;
 
   listKnowledge(input?: ID | { meeting_id?: ID; meetingId?: ID }): Promise<KnowledgeListResponse>;
   listKnowledgeDocuments(input?: ID | { meeting_id?: ID; meetingId?: ID }): Promise<KnowledgeListResponse>;

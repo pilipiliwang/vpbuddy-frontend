@@ -25,6 +25,17 @@ function makeResponse(payload = { ok: true }) {
   };
 }
 
+function makeTextResponse(text, headers = { "content-type": "text/html; charset=utf-8" }) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => headers[String(name).toLowerCase()] || null },
+    async text() {
+      return text;
+    }
+  };
+}
+
 function makeErrorResponse(status, payload = { error: "unauthorized" }) {
   return {
     ok: false,
@@ -215,6 +226,7 @@ test("protected API methods send the current Bearer JWT", async (t) => {
     ["chat history", (api) => requireMethod(api, "listChatHistory")(meetingId), "GET", `/api/meetings/${meetingId}/chat/history`],
     ["deliverables", (api) => requireMethod(api, "listDeliverables")(meetingId), "GET", `/api/meetings/${meetingId}/docs`],
     ["demo versions", (api) => requireMethod(api, "listDemoVersions")(meetingId), "GET", `/api/meetings/${meetingId}/demo/versions`],
+    ["demo version content", (api) => requireMethod(api, "getDemoVersionContent")(meetingId, 3), "GET", `/api/meetings/${meetingId}/demo/versions/3/content`],
     ["knowledge list", (api) => requireMethod(api, "listKnowledgeDocuments")(meetingId), "GET", "/api/kb/list", `?meeting_id=${meetingId}`],
     ["knowledge search", (api) => requireMethod(api, "searchKnowledge")({ q: "contract", meeting_id: meetingId }), "POST", "/api/kb/search"],
     ["knowledge upload", (api) => requireMethod(api, "uploadKnowledgeDocument")(upload, { meetingId }), "POST", "/api/kb/upload"],
@@ -232,6 +244,26 @@ test("protected API methods send the current Bearer JWT", async (t) => {
       assert.equal(headerValue(call.options.headers, "authorization"), `Bearer ${jwt}`);
     });
   }
+});
+
+test("Demo content is read as authenticated HTML instead of JSON", async () => {
+  const calls = [];
+  const html = "<!doctype html><title>Owner-only Demo</title>";
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => jwt,
+    timeoutMs: 0,
+    transport: async (url, options) => {
+      calls.push({ url, options });
+      return makeTextResponse(html);
+    }
+  });
+
+  assert.equal(await api.getDemoVersionContent(meetingId, 7), html);
+  assert.equal(calls.length, 1);
+  assertRequest(calls[0], "GET", `/api/meetings/${meetingId}/demo/versions/7/content`);
+  assert.equal(headerValue(calls[0].options.headers, "authorization"), `Bearer ${jwt}`);
+  assert.equal(headerValue(calls[0].options.headers, "accept"), "text/html");
 });
 
 test("multipart material, chat, and KB uploads preserve Bearer auth and backend fields", async () => {
@@ -325,6 +357,7 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "GET /api/meetings/:id/docs/:kind",
     "GET /api/meetings/:id/docs/:kind/download",
     "GET /api/meetings/:id/demo/versions",
+    "GET /api/meetings/:id/demo/versions/:version/content",
     "GET /api/kb/list",
     "POST /api/kb/search",
     "POST /api/kb/upload",
@@ -369,6 +402,7 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "GET /api/meetings/:param/docs/:param",
     "GET /api/meetings/:param/docs/:param/download",
     "GET /api/meetings/:param/demo/versions",
+    "GET /api/meetings/:param/demo/versions/:param/content",
     "GET /api/kb/list",
     "GET /api/kb/search",
     "POST /api/kb/search",

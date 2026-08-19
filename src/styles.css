@@ -3670,6 +3670,39 @@ body.stage-fullscreen-active {
   background: #fff;
 }
 
+.demo-preview-status {
+  width: 100%;
+  min-height: 240px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  text-align: center;
+}
+
+.demo-preview-status .meeting-loading-spinner {
+  margin-bottom: 16px;
+}
+
+.demo-preview-status strong {
+  color: #f4f8ff;
+  font-size: 18px;
+}
+
+.demo-preview-status p {
+  max-width: 520px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.demo-preview-status button {
+  margin-top: 16px;
+}
+
 .deliverable-content,
 .summary-doc-content {
   margin: 20px 0 0;

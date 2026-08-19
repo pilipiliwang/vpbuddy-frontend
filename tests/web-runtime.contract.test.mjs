@@ -162,14 +162,14 @@ test("HTTP, upload-style bodies and non-api backend paths remain byte-compatible
   });
 
   await fetch(`${fixture.origin}/vpbuddy/meetings/m-1/recording/start`, { method: "POST" });
-  await fetch(`${fixture.origin}/vpbuddy/docs/m-1/demo.html?v=V2`);
+  await fetch(`${fixture.origin}/vpbuddy/api/meetings/m-1/demo/versions/2/content`);
   await fetch(`${fixture.origin}/api/client/device-status?via=upstream-strip`);
   assert.deepEqual(
     fixture.requests.map((entry) => entry.url),
     [
       "/api/meetings/m-1/materials?source=web",
       "/meetings/m-1/recording/start",
-      "/docs/m-1/demo.html?v=V2",
+      "/api/meetings/m-1/demo/versions/2/content",
       "/api/client/device-status?via=upstream-strip"
     ]
   );
@@ -205,10 +205,11 @@ test("realtime ASR WebSocket upgrades preserve path, query and authorization", a
 test("only the existing backend route families are proxied", () => {
   assert.equal(isProxyPath("/vpbuddy/api/auth/me"), true);
   assert.equal(isProxyPath("/vpbuddy/meetings/id/recording/start"), true);
-  assert.equal(isProxyPath("/vpbuddy/docs/id/demo.html"), true);
+  assert.equal(isProxyPath("/vpbuddy/api/meetings/id/demo/versions/2/content"), true);
   assert.equal(isProxyPath("/api/auth/me"), true);
   assert.equal(isProxyPath("/meetings/id/recording/start"), true);
-  assert.equal(isProxyPath("/docs/id/demo.html"), true);
+  assert.equal(isProxyPath("/vpbuddy/docs/id/demo.html"), false);
+  assert.equal(isProxyPath("/docs/id/demo.html"), false);
   assert.equal(isProxyPath("/apiary"), false);
   assert.equal(isProxyPath("/vpbuddy/apiary"), false);
   assert.equal(isProxyPath("/package.json"), false);

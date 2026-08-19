@@ -120,6 +120,13 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     return readJsonResponse(response);
   }
 
+  async function requestText(path, options = {}) {
+    const { response, auth, token } = await performRequest(path, options);
+    if (!response.ok) await throwResponseError(response, auth, token);
+    if (response.status === 204) return "";
+    return response.text();
+  }
+
   function responseFilename(response) {
     const disposition = response.headers?.get?.("content-disposition") || "";
     const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
@@ -283,6 +290,14 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     downloadDeliverable: (meetingId, kind) => requestBlob(`/api/meetings/${encodeURIComponent(meetingId)}/docs/${encodeURIComponent(kind)}/download`, { timeoutMs: 120000 }),
     listDemoVersions: (meetingId) => request(`/api/meetings/${encodeURIComponent(meetingId)}/demo/versions`),
     getDemoVersions: (meetingId) => request(`/api/meetings/${encodeURIComponent(meetingId)}/demo/versions`),
+    getDemoVersionContent: (meetingId, version, options = {}) => requestText(
+      `/api/meetings/${encodeURIComponent(meetingId)}/demo/versions/${encodeURIComponent(version)}/content`,
+      {
+        ...options,
+        headers: { Accept: "text/html", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
 
     listKnowledge: (input) => request(knowledgeListPath(input)),
     listKnowledgeDocuments: (input) => request(knowledgeListPath(input)),
@@ -379,7 +394,8 @@ export const endpoints = {
     list: "GET /api/meetings/:id/docs",
     detail: "GET /api/meetings/:id/docs/:kind",
     download: "GET /api/meetings/:id/docs/:kind/download",
-    demoVersions: "GET /api/meetings/:id/demo/versions"
+    demoVersions: "GET /api/meetings/:id/demo/versions",
+    demoContent: "GET /api/meetings/:id/demo/versions/:version/content"
   },
   knowledge: {
     list: "GET /api/kb/list",

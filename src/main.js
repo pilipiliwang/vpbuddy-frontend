@@ -57,6 +57,11 @@ const state = {
   selectedDemoVersion: "",
   demoVersionPinned: false,
   demoVersionMessage: "",
+  demoPreviewMeetingId: "",
+  demoPreviewVersion: "",
+  demoPreviewUrl: "",
+  demoPreviewStatus: "idle",
+  demoPreviewError: "",
   selectedFollowup: "",
   selectedExplanation: "",
   currentSlide: 1,
@@ -125,9 +130,11 @@ let recordingTimer = 0;
 let knowledgeSearchTimer = 0;
 let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
+let demoPreviewLoadSequence = 0;
 let meetingMaterialsRevision = 0;
 let vpbuddyChatRequestSequence = 0;
 let presentationPreviewBlob = null;
+let demoPreviewAbortController = null;
 let pdfRendererModulePromise = null;
 let html2canvasModulePromise = null;
 let pdfResizeTimer = 0;
@@ -999,21 +1006,111 @@ function getSelectedDemoVersion() {
   return demoVersions.find((item) => item.version === selected) || demoVersions[0] || null;
 }
 
+function isDemoDeliverableReady(deliverable) {
+  return Boolean(deliverable && ["已完成", "ready", "available", "generated", "stored", "complete", "completed"]
+    .some((status) => String(deliverable.status || "").toLowerCase().includes(status.toLowerCase())));
+}
+
+function revokeDemoPreviewUrl(url) {
+  if (!url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  URL.revokeObjectURL(url);
+}
+
+function clearDemoPreview({ status = "idle", error = "" } = {}) {
+  demoPreviewLoadSequence += 1;
+  demoPreviewAbortController?.abort();
+  demoPreviewAbortController = null;
+  const previousUrl = state.demoPreviewUrl;
+  state.demoPreviewMeetingId = "";
+  state.demoPreviewVersion = "";
+  state.demoPreviewUrl = "";
+  state.demoPreviewStatus = status;
+  state.demoPreviewError = error;
+  revokeDemoPreviewUrl(previousUrl);
+}
+
+function shouldLoadDemoPreview() {
+  if (state.view === "summary") return true;
+  if (state.view !== "meeting" || state.stageTab !== "deliverable") return false;
+  return canonicalDeliverableKind(getSelectedDeliverable()?.kind) === "demo";
+}
+
+function demoPreviewErrorMessage(error) {
+  if (error?.status === 403) return "无权访问该会议的 Demo";
+  if (error?.status === 404) return "所选 Demo 版本不存在或尚未生成";
+  if (error?.status === 401) return "登录已失效，请重新登录";
+  return `Demo 加载失败：${error?.message || "未知错误"}`;
+}
+
+async function loadDemoPreviewContent(meetingId = state.selectedMeetingId, { force = false } = {}) {
+  const deliverable = deliverables.find((item) => canonicalDeliverableKind(item.kind) === "demo");
+  const selected = getSelectedDemoVersion();
+  const version = selected?.version;
+  if (!meetingId || !Number.isFinite(version) || !isDemoDeliverableReady(deliverable) || !shouldLoadDemoPreview()) {
+    clearDemoPreview();
+    return;
+  }
+
+  const samePreview = state.demoPreviewMeetingId === meetingId && Number(state.demoPreviewVersion) === Number(version);
+  if (!force && samePreview && ["loading", "ready"].includes(state.demoPreviewStatus)) return;
+
+  const loadSequence = ++demoPreviewLoadSequence;
+  demoPreviewAbortController?.abort();
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  demoPreviewAbortController = controller;
+  const previousUrl = state.demoPreviewUrl;
+  state.demoPreviewMeetingId = meetingId;
+  state.demoPreviewVersion = version;
+  state.demoPreviewUrl = "";
+  state.demoPreviewStatus = "loading";
+  state.demoPreviewError = "";
+  render();
+  revokeDemoPreviewUrl(previousUrl);
+
+  try {
+    const html = await api.getDemoVersionContent(meetingId, version, { signal: controller?.signal });
+    if (!String(html || "").trim()) throw new Error("后端返回了空的 Demo 内容");
+    const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+    const selectedVersion = getSelectedDemoVersion()?.version;
+    if (
+      loadSequence !== demoPreviewLoadSequence
+      || meetingId !== state.selectedMeetingId
+      || Number(version) !== Number(selectedVersion)
+      || !shouldLoadDemoPreview()
+    ) {
+      revokeDemoPreviewUrl(blobUrl);
+      return;
+    }
+    state.demoPreviewUrl = blobUrl;
+    state.demoPreviewStatus = "ready";
+    state.demoPreviewError = "";
+    state.demoVersionMessage = "";
+  } catch (error) {
+    if (error?.name === "AbortError" || loadSequence !== demoPreviewLoadSequence) return;
+    state.demoPreviewUrl = "";
+    state.demoPreviewStatus = "error";
+    state.demoPreviewError = demoPreviewErrorMessage(error);
+  } finally {
+    if (loadSequence === demoPreviewLoadSequence) demoPreviewAbortController = null;
+  }
+  render();
+}
+
 function getDemoPreviewState(deliverable = deliverables.find((item) => canonicalDeliverableKind(item.kind) === "demo")) {
   const selected = getSelectedDemoVersion();
   const versionLabel = selected?.label || normalizeVersionLabel(deliverable?.version) || "V1";
-  const file = selected?.file || "demo_latest.html";
-  const isReady = Boolean(deliverable && ["已完成", "ready", "available", "generated", "stored", "complete", "completed"]
-    .some((status) => String(deliverable.status || "").toLowerCase().includes(status.toLowerCase())));
-  const url = isReady
-    ? `${apiBaseUrl.replace(/\/$/, "")}/docs/${encodeURIComponent(state.selectedMeetingId)}/${encodeURIComponent(file)}?v=${encodeURIComponent(versionLabel)}`
-    : "";
+  const version = selected?.version ?? "";
+  const samePreview = state.demoPreviewMeetingId === state.selectedMeetingId
+    && Number(state.demoPreviewVersion) === Number(version);
+  const status = isDemoDeliverableReady(deliverable) && samePreview ? state.demoPreviewStatus : "idle";
   return {
     selected,
     versionLabel,
-    file,
-    url,
-    frameKey: `${state.selectedMeetingId || "meeting"}:${file}:${versionLabel}`
+    version,
+    status,
+    error: samePreview ? state.demoPreviewError : "",
+    url: status === "ready" ? state.demoPreviewUrl : "",
+    frameKey: `${state.selectedMeetingId || "meeting"}:${version || versionLabel}`
   };
 }
 
@@ -1108,6 +1205,7 @@ function resetAuthenticatedSession(message = "") {
   closeMeetingEvents();
   resetRecordingState();
   clearPresentationPreview();
+  clearDemoPreview();
   clearMaterialPreviewDownloadCache();
   for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, todoItems]) {
     replaceArray(collection, []);
@@ -1226,6 +1324,28 @@ function renderEmptyState(title, description = "", modifier = "") {
   `;
 }
 
+function renderDemoPreviewStatus(preview, { modifier = "", emptyMessage = "Demo 尚未生成可预览版本" } = {}) {
+  if (preview?.status === "loading") {
+    return `
+      <div class="demo-preview-status is-loading ${modifier}" role="status" aria-live="polite">
+        <span class="meeting-loading-spinner" aria-hidden="true"></span>
+        <strong>正在安全加载 Demo</strong>
+        <p>正在通过会议所有者鉴权接口读取 ${escapeHtml(preview.versionLabel)}。</p>
+      </div>
+    `;
+  }
+  if (preview?.status === "error") {
+    return `
+      <div class="demo-preview-status is-error ${modifier}" role="alert">
+        <strong>Demo 暂时无法显示</strong>
+        <p>${escapeHtml(preview.error || "加载失败，请稍后重试")}</p>
+        <button class="ghost small" data-action="retry-demo-preview">重新加载</button>
+      </div>
+    `;
+  }
+  return renderEmptyState("Demo 暂不可预览", emptyMessage, modifier);
+}
+
 async function loadMeetingsFromBackend() {
   setApiStatus("loading", "连接后端中");
   render();
@@ -1250,6 +1370,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   const hasCachedDetail = state.loadedMeetingDetailId === meetingId;
   state.meetingDetailLoading = !hasCachedDetail;
   if (!hasCachedDetail) {
+    clearDemoPreview();
     restoreTranscriptRecords(meetingId);
     replaceArray(materials, []);
     replaceArray(deliverables, []);
@@ -1382,6 +1503,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   state.loadedMeetingDetailId = meetingId;
   state.meetingDetailLoading = false;
   render();
+  void loadDemoPreviewContent(meetingId);
 }
 
 async function loadKnowledgeFromBackend() {
@@ -2269,6 +2391,7 @@ async function deleteMeetingById(meetingId) {
     forgetMeetingStatus(meetingId);
     transcriptRecordStore.remove(meetingId);
     if (state.selectedMeetingId === meetingId) {
+      clearDemoPreview();
       state.selectedMeetingId = meetings[0]?.id || "";
       resetRecordingState();
       closeMeetingEvents();
@@ -3452,7 +3575,6 @@ function renderDeliverableCanvas() {
     .map((value) => String(value || "").trim())
     .find((value) => value && value !== bodyContent) || "后端生成文档";
   const displayedVersion = selectedDemo?.label || current.version;
-  const previewFile = selectedDemo?.file || "demo_latest.html";
   const demoPreview = isDemoDeliverable ? getDemoPreviewState(current) : null;
   const demoPreviewUrl = demoPreview?.url || "";
   return `
@@ -3464,7 +3586,7 @@ function renderDeliverableCanvas() {
         ${renderDeliverableDownloadMenu(current)}
       </div>
     </div>
-    <section class="deliverable-doc ${demoPreviewUrl ? "demo-deliverable-doc" : ""}">
+    <section class="deliverable-doc ${isDemoDeliverable ? "demo-deliverable-doc" : ""}">
       ${hasTextBody ? "" : `
         <header class="${isTextOnlyDeliverable ? "text-only-deliverable-header" : ""}">
           ${isTextOnlyDeliverable ? "" : docBadge(current.type)}
@@ -3472,20 +3594,25 @@ function renderDeliverableCanvas() {
           ${isDemoDeliverable || isTextOnlyDeliverable ? "" : `<span>${escapeHtml(displayedVersion)}</span>`}
         </header>
       `}
-      ${demoPreviewUrl
-        ? `<iframe
-            class="deliverable-demo-preview"
-            src="${escapeHtml(demoPreviewUrl)}"
-            data-stable-demo-frame="meeting-demo"
-            title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
-            sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
-            referrerpolicy="no-referrer"
-          ></iframe>`
+      ${isDemoDeliverable
+        ? demoPreviewUrl
+          ? `<iframe
+              class="deliverable-demo-preview"
+              src="${escapeHtml(demoPreviewUrl)}"
+              data-stable-demo-frame="meeting-demo"
+              title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
+              sandbox="allow-scripts allow-forms allow-modals"
+              referrerpolicy="no-referrer"
+            ></iframe>`
+          : renderDemoPreviewStatus(demoPreview, {
+              modifier: "deliverable-empty",
+              emptyMessage: state.demoVersionMessage || `${current.status || "后端尚未生成可用版本"}`
+            })
         : current.content
         ? isTextOnlyDeliverable
           ? `<article class="deliverable-content markdown-content">${renderMarkdown(current.content)}</article>`
           : `<pre class="deliverable-content">${escapeHtml(current.content)}</pre>`
-        : renderEmptyState("暂无在线正文预览", canonicalDeliverableKind(current.kind) === "demo" ? "交互 Demo 请下载 HTML 文件查看。" : "文档正文尚未生成或后端列表仅返回元数据。", "deliverable-empty")}
+        : renderEmptyState("暂无在线正文预览", "文档正文尚未生成或后端列表仅返回元数据。", "deliverable-empty")}
     </section>
   `;
 }
@@ -3660,14 +3787,13 @@ function renderSummaryDeliverable(item) {
               src="${escapeHtml(preview.url)}"
               data-stable-demo-frame="summary-demo"
               title="${escapeHtml(`${item.name || "Demo"} ${preview.versionLabel} 预览`)}"
-              sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+              sandbox="allow-scripts allow-forms allow-modals"
               referrerpolicy="no-referrer"
             ></iframe>`
-          : renderEmptyState(
-              "Demo 暂不可预览",
-              state.demoVersionMessage || `${item.status || "后端尚未生成可用版本"}`,
-              "summary-deliverable-empty"
-            )}
+          : renderDemoPreviewStatus(preview, {
+              modifier: "summary-deliverable-empty",
+              emptyMessage: state.demoVersionMessage || `${item.status || "后端尚未生成可用版本"}`
+            })}
       </article>
     `;
   }
@@ -4401,6 +4527,7 @@ document.addEventListener("click", async (event) => {
   if (action === "nav") {
     state.view = target.dataset.view;
     if (state.view !== "meeting") {
+      clearDemoPreview();
       resetMeetingTitleEditState();
       meetingDetailLoadSequence += 1;
       state.meetingDetailLoading = false;
@@ -4466,6 +4593,7 @@ document.addEventListener("click", async (event) => {
     const preserveActiveRecording = nextMeetingId === state.selectedMeetingId
       && Boolean(realtimeAsrSession)
       && ["starting", "recording", "paused", "pausing", "resuming"].includes(state.recordingStatus);
+    clearDemoPreview();
     state.selectedMeetingId = nextMeetingId;
     if (!preserveActiveRecording) resetRecordingState();
     state.stageTab = "presentation";
@@ -4484,6 +4612,7 @@ document.addEventListener("click", async (event) => {
     resetMeetingTitleEditState();
     const nextMeetingId = target.dataset.id || state.selectedMeetingId;
     if (preventActiveRecordingMeetingSwitch(nextMeetingId)) return;
+    if (nextMeetingId !== state.selectedMeetingId) clearDemoPreview();
     state.selectedMeetingId = nextMeetingId;
     state.view = "summary";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
@@ -4523,7 +4652,12 @@ document.addEventListener("click", async (event) => {
     if (state.stageTab === "deliverable") {
       state.deliverableLeftTab = "deliverables";
       state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    } else {
+      clearDemoPreview();
     }
+    render();
+    if (state.stageTab === "deliverable") void loadDemoPreviewContent();
+    return;
   }
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
   if (action === "deliverable-left-tab") {
@@ -4585,7 +4719,14 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
-  if (action === "select-deliverable") state.selectedDeliverable = target.dataset.id;
+  if (action === "select-deliverable") {
+    state.selectedDeliverable = target.dataset.id;
+    const selected = getSelectedDeliverable();
+    if (canonicalDeliverableKind(selected?.kind) !== "demo") clearDemoPreview();
+    render();
+    if (canonicalDeliverableKind(selected?.kind) === "demo") void loadDemoPreviewContent();
+    return;
+  }
   if (action === "download-current-deliverable") {
     await downloadCurrentDeliverable(target.dataset.id);
     return;
@@ -4641,6 +4782,10 @@ document.addEventListener("click", async (event) => {
   if (action === "refresh-deliverables") {
     await refreshDeliverables(state.selectedMeetingId);
     setToast("交付物状态已刷新");
+    return;
+  }
+  if (action === "retry-demo-preview") {
+    void loadDemoPreviewContent(state.selectedMeetingId, { force: true });
     return;
   }
   if (action === "open-followup") {
@@ -4765,7 +4910,9 @@ document.addEventListener("change", async (event) => {
       state.selectedDemoVersion = version;
       state.demoVersionPinned = true;
     }
+    clearDemoPreview();
     render();
+    void loadDemoPreviewContent();
     return;
   }
   if (event.target.matches(".settings-model")) {
@@ -5076,6 +5223,8 @@ document.addEventListener("pointerup", () => {
 });
 
 window.addEventListener("resize", updateAnnotationViewport);
+
+window.addEventListener("pagehide", () => clearDemoPreview());
 
 window.addEventListener("popstate", () => {
   if (!webLandingEnabled) return;
