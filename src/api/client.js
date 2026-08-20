@@ -184,6 +184,16 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     return withQuery("/api/kb/list", { meeting_id: meetingId });
   }
 
+  function templateListPath(input = {}) {
+    return withQuery("/api/templates", {
+      q: input.q ?? input.query,
+      industry: input.industry,
+      sort: input.sort ?? "default",
+      page: input.page ?? 1,
+      page_size: input.page_size ?? input.pageSize ?? 20
+    });
+  }
+
   function collabAsk(meetingId, sectionOrInput, question, asker = "agent") {
     const input = typeof sectionOrInput === "object" && sectionOrInput !== null
       ? sectionOrInput
@@ -215,6 +225,44 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     login: (input) => request("/api/auth/login", { method: "POST", body: JSON.stringify(input), auth: false }),
     me: () => request("/api/auth/me"),
     getDeviceStatus: () => request("/api/client/device-status"),
+
+    listTemplates: (input = {}) => request(templateListPath(input)),
+    getTemplate: (templateId) => request(`/api/templates/${encodeURIComponent(templateId)}`),
+    getTemplateDetail: (templateId) => request(`/api/templates/${encodeURIComponent(templateId)}`),
+    getTemplatePreview: (templateId, options = {}) => requestText(
+      `/api/templates/${encodeURIComponent(templateId)}/preview`,
+      {
+        ...options,
+        headers: { Accept: "text/html", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
+    getTemplateCover: (templateId, options = {}) => requestBlob(
+      `/api/templates/${encodeURIComponent(templateId)}/cover`,
+      {
+        ...options,
+        headers: { Accept: "image/*", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
+    applyTemplate: (templateId, input = {}, options = {}) => {
+      const requestId = input.request_id ?? input.requestId ?? options.idempotencyKey ?? "";
+      const payload = {
+        project_name: input.project_name ?? input.projectName ?? "",
+        request_id: requestId
+      };
+      const meetingId = input.meeting_id ?? input.meetingId;
+      if (meetingId) payload.meeting_id = meetingId;
+      return request(`/api/templates/${encodeURIComponent(templateId)}/apply`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: requestId ? { "Idempotency-Key": requestId } : {},
+        timeoutMs: options.timeoutMs ?? 120000
+      });
+    },
+    getTemplateApplication: (requestId) => request(
+      `/api/templates/applications/${encodeURIComponent(requestId)}`
+    ),
 
     listMeetings: () => request("/api/meetings"),
     checkMeetingId: (id) => request(withQuery("/api/meetings/check_id", { id })),
@@ -359,6 +407,14 @@ export const endpoints = {
   },
   client: {
     deviceStatus: "GET /api/client/device-status"
+  },
+  templates: {
+    list: "GET /api/templates",
+    detail: "GET /api/templates/:id",
+    preview: "GET /api/templates/:id/preview",
+    cover: "GET /api/templates/:id/cover",
+    apply: "POST /api/templates/:id/apply",
+    application: "GET /api/templates/applications/:requestId"
   },
   meetings: {
     list: "GET /api/meetings",

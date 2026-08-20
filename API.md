@@ -52,6 +52,19 @@
 - `GET /deliverables/:id/versions`：交付物版本列表
 - `PATCH /deliverables/:id/version`：切换当前版本
 
+## Industry Templates
+
+行业模板接口统一使用 `Authorization: Bearer <token>`，列表、详情、封面、预览和应用结果均以后端响应为准。
+
+- `GET /api/templates?q=&industry=&sort=default&page=1&page_size=20`：分页读取模板；`q` 搜索模板名称/场景，`industry` 按后端返回的行业值筛选，`sort` 支持 `default`、`updated`。
+- `GET /api/templates/{template_id}`：读取模板详情、角色、模块、标签和应用说明。
+- `GET /api/templates/{template_id}/cover`：读取鉴权封面图片。前端以 Bearer 请求 Blob，并使用可回收的临时 Blob URL 展示，不将 JWT 写入图片 URL。
+- `GET /api/templates/{template_id}/preview`：读取鉴权 HTML 预览。前端以 Bearer 请求正文，并在不包含 `allow-same-origin` 的沙箱 iframe 中展示。
+- `POST /api/templates/{template_id}/apply`：应用模板。请求头必须携带 `Idempotency-Key`，请求体为 `{ "project_name": string, "request_id": string, "meeting_id"?: string }`。
+- `GET /api/templates/applications/{request_id}`：查询应用状态，用于请求超时或网络中断后的幂等恢复。
+
+应用成功后，响应应包含创建/复用的会议和 Demo V1 信息。前端进入对应会议的“交付物”页并选择 Demo，但不会自动开始录音。
+
 ### 当前后端 Demo 安全预览
 
 - `GET /api/meetings/:id/demo/versions`：读取当前用户拥有会议的 Demo 版本清单。
