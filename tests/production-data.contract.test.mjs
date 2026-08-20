@@ -73,6 +73,7 @@ test("production-backed collections do not boot from embedded mock records", () 
     "aiFollowupQuestions",
     "deliverables",
     "demoVersions",
+    "industryTemplates",
     "conceptSources",
     "explanationFindings",
     "knowledgeDocs",
@@ -107,7 +108,10 @@ test("production request failures never switch to mock data or local substitutes
 test("meeting cards do not treat a missing backend lifecycle as active", () => {
   assertSourceIncludes(mainSource, /function\s+normalizeStatus\s*\(value,\s*fallback\s*=\s*["']已结束["']\)/, "missing meeting status must default to ended, not active");
   assertSourceIncludes(mainSource, /const\s+rememberedStatus\s*=\s*getRememberedMeetingStatus\(id\)/, "meeting normalization must read the locally remembered lifecycle");
-  assertSourceIncludes(mainSource, /normalizeStatus\(explicitStatus,\s*rememberedStatus\s*\|\|\s*["']已结束["']\)/, "meeting normalization must use the remembered lifecycle before the safe historical fallback");
+  assertSourceIncludes(mainSource, /const\s+rememberedTime\s*=\s*getRememberedMeetingTime\(id\)/, "meeting normalization must retain the locally remembered creation time when list responses omit it");
+  assertSourceIncludes(mainSource, /function\s+normalizeMeeting\([^)]*\{\s*fallbackStatus\s*=\s*["']已结束["']\s*\}\s*=\s*\{\}\)/, "ordinary meeting normalization must retain the safe historical fallback");
+  assertSourceIncludes(mainSource, /normalizeStatus\(explicitStatus,\s*rememberedStatus\s*\|\|\s*fallbackStatus\)/, "meeting normalization must use the remembered lifecycle before its explicit fallback");
+  assertSourceIncludes(mainSource, /rememberedStatus\s*===\s*["']进行中["'][\s\S]{0,100}?isAmbiguousCompletionStatus\(explicitStatus\)[\s\S]{0,100}?status\s*=\s*["']进行中["']/, "a completed template application must not end its newly created meeting");
   assertSourceIncludes(mainSource, /api\.createMeeting\s*\([\s\S]{0,500}?status:\s*["']进行中["'][\s\S]{0,150}?rememberMeetingStatus\(meeting\.id,\s*meeting\.status\)/, "newly created meetings must remain active in the current account");
   assertSourceIncludes(mainSource, /api\.archiveMeeting\(meeting\.id\)[\s\S]{0,180}?meeting\.status\s*=\s*["']已结束["'][\s\S]{0,120}?rememberMeetingStatus/, "ending a meeting must persist its local lifecycle");
   assertSourceIncludes(mainSource, /api\.deleteMeeting\(meetingId\)[\s\S]{0,250}?forgetMeetingStatus\(meetingId\)/, "deleting a meeting must clear its remembered lifecycle");
@@ -128,7 +132,13 @@ test("only Demo exposes backend version switching", () => {
   assertSourceIncludes(mainSource, /class=["']demo-version-select["']/, "Demo must expose its backend version selector");
   assertSourceIncludes(mainSource, /matches\(["']\.demo-version-select["']\)[\s\S]{0,260}?selectedDemoVersion/, "changing the Demo selector must update the selected Demo version");
   assertSourceIncludes(canvasSource, /getSelectedDemoVersion\(\)\s*\|\|\s*demoVersions\[0\]/, "a pinned Demo version must win over the latest manifest fallback");
-  assertSourceIncludes(canvasSource, /selectedDemo\?\.file\s*\|\|\s*["']demo_latest\.html["']/, "the Demo iframe must use the selected manifest file with a latest fallback");
+  assertSourceIncludes(mainSource, /api\.getDemoVersionContent\s*\(/, "Demo preview content must use the owner-authenticated backend endpoint");
+  assertSourceIncludes(mainSource, /URL\.createObjectURL\s*\(\s*new Blob/, "authenticated Demo HTML must be rendered from a local Blob URL");
+  assertSourceIncludes(mainSource, /new AbortController\s*\(/, "rapid Demo version changes must cancel stale content requests");
+  assertSourceIncludes(mainSource, /URL\.revokeObjectURL\s*\(/, "Demo Blob URLs must be released when the preview changes or closes");
+  assertSourceIncludes(mainSource, /sandbox=["']allow-scripts allow-forms allow-modals["']/, "Demo HTML must run in an opaque-origin sandbox");
+  assertSourceExcludes(mainSource, /sandbox=["'][^"']*allow-same-origin/, "generated Demo HTML must not receive same-origin access to the VPBuddy app");
+  assertSourceExcludes(mainSource, /\/docs\/\$\{encodeURIComponent\(state\.selectedMeetingId\)/, "Demo preview must never fall back to the public /docs path");
   assertSourceExcludes(mainSource, /class=["']deliverable-version-select["']/, "the five text deliverables must not expose a shared version selector");
   assertSourceExcludes(mainSource, /renderUnifiedDeliverableVersionControl/, "the obsolete six-document unified version control must be removed");
 });
@@ -237,6 +247,14 @@ test("Demo iframe is reused for unrelated renders and replaced only when src cha
   assertSourceIncludes(mainSource, /current\.getAttribute\(["']src["']\)\s*===\s*next\.getAttribute\(["']src["']\)/, "a Demo frame may be reused only when its src is unchanged");
   assertSourceIncludes(mainSource, /canPreserveFrame[\s\S]{0,180}?patchDomChildren\(app,\s*template\.content\)/, "unrelated state updates must patch the existing DOM instead of rebuilding the iframe");
   assertSourceIncludes(mainSource, /data-stable-demo-frame=["']meeting-demo["']/, "the meeting Demo iframe must opt into stable reuse");
+});
+
+test("Demo preview hides only the document scrollbar while preserving scrolling", () => {
+  assertSourceIncludes(mainSource, /function\s+prepareDemoPreviewHtml[\s\S]{0,500}?html::-webkit-scrollbar[\s\S]{0,180}?body::-webkit-scrollbar/, "the generated Demo document must suppress its root native scrollbar");
+  assertSourceIncludes(mainSource, /const\s+previewHtml\s*=\s*prepareDemoPreviewHtml\(html\)[\s\S]{0,180}?new Blob\(\[previewHtml\]/, "the prepared Demo HTML must create the preview Blob");
+  const previewSource = sourceBetween(mainSource, "function prepareDemoPreviewHtml", "async function loadDemoPreviewContent");
+  assert.doesNotMatch(previewSource, /\*::-webkit-scrollbar/, "nested Demo controls must retain their own scroll affordances");
+  assert.doesNotMatch(previewSource, /overflow:\s*hidden/, "the preview document must remain scrollable");
 });
 
 test("long account names stay inside the sidebar card", () => {

@@ -8,7 +8,7 @@ const modulePath = fileURLToPath(import.meta.url);
 const defaultRoot = dirname(modulePath);
 const defaultBackendUrl = "http://47.100.182.3:28765";
 const webProxyMount = "/vpbuddy";
-const backendProxyPrefixes = ["/api", "/meetings", "/docs"];
+const backendProxyPrefixes = ["/api", "/meetings"];
 const staticPrefixes = [
   "/src/",
   "/assets/",

@@ -46,6 +46,26 @@ const state = {
   loadedMeetingDetailId: "",
   meetingLeftTab: "records",
   deliverableLeftTab: "deliverables",
+  templateQuery: "",
+  templateIndustry: "",
+  templateSort: "default",
+  templatePage: 1,
+  templatePageSize: 6,
+  templateStatus: "idle",
+  templateError: "",
+  templateTotal: 0,
+  templateIndustries: [],
+  selectedTemplateId: "",
+  templateDetail: null,
+  templateDetailStatus: "idle",
+  templateDetailError: "",
+  templatePreviewUrl: "",
+  templatePreviewStatus: "idle",
+  templatePreviewError: "",
+  applyingTemplateId: "",
+  templateApplyRequestId: "",
+  templateApplyRequestTemplateId: "",
+  templateApplyError: "",
   selectedKnowledge: "",
   selectedMeetingId: "",
   meetingTitleEditing: false,
@@ -57,6 +77,11 @@ const state = {
   selectedDemoVersion: "",
   demoVersionPinned: false,
   demoVersionMessage: "",
+  demoPreviewMeetingId: "",
+  demoPreviewVersion: "",
+  demoPreviewUrl: "",
+  demoPreviewStatus: "idle",
+  demoPreviewError: "",
   selectedFollowup: "",
   selectedExplanation: "",
   currentSlide: 1,
@@ -123,17 +148,28 @@ let meetingEventSource = null;
 let realtimeAsrSession = null;
 let recordingTimer = 0;
 let knowledgeSearchTimer = 0;
+let templateSearchTimer = 0;
 let meetingDetailLoadSequence = 0;
 let materialPreviewLoadSequence = 0;
+let demoPreviewLoadSequence = 0;
+let templateListLoadSequence = 0;
+let templateDetailLoadSequence = 0;
+let templatePreviewLoadSequence = 0;
+let templateAssetGeneration = 0;
+let templateAssetRenderFrame = 0;
 let meetingMaterialsRevision = 0;
 let vpbuddyChatRequestSequence = 0;
 let presentationPreviewBlob = null;
+let demoPreviewAbortController = null;
+let templatePreviewAbortController = null;
 let pdfRendererModulePromise = null;
 let html2canvasModulePromise = null;
 let pdfResizeTimer = 0;
 let pdfPreviewRuntime = createEmptyPdfPreviewRuntime();
 const pendingVpbuddyChatRequests = new Map();
 const materialPreviewDownloadCache = new Map();
+const templateCoverUrls = new Map();
+const templateCoverStates = new Map();
 
 const user = {
   name: "VPBuddy 用户",
@@ -159,6 +195,7 @@ const aiFollowupQuestions = [];
 const deliverables = [];
 const demoVersions = [];
 const conceptSources = [];
+const industryTemplates = [];
 
 const deliverableArchiveSpecs = [
   { kind: "req", label: "需求文档", filename: "需求文档.md" },
@@ -198,6 +235,7 @@ const uiVisibility = Object.freeze({
 
 const navItems = [
   ["workspace", "工作台", "grid"],
+  ["templates", "行业模板", "briefcase"],
   ["knowledge", "知识库", "book"],
   ["settings", "设置", "settings"]
 ].filter(([view]) => view !== "settings" || uiVisibility.settingsNavigation);
@@ -207,6 +245,7 @@ const iconPaths = {
   arrowRight: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4v15.5"/><path d="M20 4v18"/><path d="M6.5 2H20v15H6.5A2.5 2.5 0 0 0 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
   bot: '<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M9 14h.01"/><path d="M15 14h.01"/><path d="M9 18h6"/>',
+  briefcase: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 12h18"/><path d="M10 12v2h4v-2"/>',
   calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/>',
   camera: '<path d="M14.5 4 13 2H9L7.5 4H5a3 3 0 0 0-3 3v11a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3Z"/><circle cx="12" cy="13" r="4"/><path d="M18 8h.01"/>',
   check: '<path d="m20 6-11 11-5-5"/>',
@@ -301,18 +340,38 @@ function meetingStatusCacheId(meetingId) {
   return `${state.authEmail || "anonymous"}:${meetingId}`;
 }
 
-function getRememberedMeetingStatus(meetingId) {
+function getMeetingStatusCacheEntry(meetingId) {
   const entry = meetingStatusCache[meetingStatusCacheId(meetingId)];
-  return typeof entry === "string" ? entry : entry?.status || "";
+  if (typeof entry === "string") return { status: entry };
+  return entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
 }
 
-function rememberMeetingStatus(meetingId, status) {
-  if (!meetingId || !status) return;
+function getRememberedMeetingStatus(meetingId) {
+  return getMeetingStatusCacheEntry(meetingId).status || "";
+}
+
+function getRememberedMeetingTime(meetingId) {
+  return getMeetingStatusCacheEntry(meetingId).time || "";
+}
+
+function rememberMeetingDisplayMetadata(meetingId, { status = "", time = "" } = {}) {
+  if (!meetingId || (!status && !time)) return;
+  const current = getMeetingStatusCacheEntry(meetingId);
   meetingStatusCache[meetingStatusCacheId(meetingId)] = {
-    status,
+    ...current,
+    ...(status ? { status } : {}),
+    ...(time ? { time } : {}),
     updated_at: new Date().toISOString()
   };
   window.localStorage?.setItem(meetingStatusStorageKey, JSON.stringify(meetingStatusCache));
+}
+
+function rememberMeetingStatus(meetingId, status) {
+  rememberMeetingDisplayMetadata(meetingId, { status });
+}
+
+function rememberMeetingTime(meetingId, time) {
+  rememberMeetingDisplayMetadata(meetingId, { time });
 }
 
 function forgetMeetingStatus(meetingId) {
@@ -515,6 +574,7 @@ function render() {
     landing: renderLanding,
     login: renderLogin,
     workspace: renderWorkspace,
+    templates: renderIndustryTemplates,
     meeting: renderMeetingStage,
     summary: renderSummary,
     knowledge: renderKnowledge,
@@ -691,6 +751,21 @@ function normalizeStatus(value, fallback = "已结束") {
   return fallback;
 }
 
+function hasMeetingClosedMarker(raw = {}) {
+  const stateData = raw.state || {};
+  return Boolean(
+    raw.closed_at || raw.closedAt || raw.ended_at || raw.endedAt || raw.archived_at || raw.archivedAt
+    || stateData.closed_at || stateData.closedAt || stateData.ended_at || stateData.endedAt
+    || stateData.archived_at || stateData.archivedAt
+    || raw.closed === true || raw.is_closed === true || stateData.closed === true || stateData.is_closed === true
+  );
+}
+
+function isAmbiguousCompletionStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  return ["done", "complete", "completed", "success", "succeeded"].includes(status);
+}
+
 function formatBackendDateTime(value, fallback = "") {
   if (!value) return fallback;
   const date = new Date(value);
@@ -705,25 +780,29 @@ function formatBackendDateTime(value, fallback = "") {
   });
 }
 
-function normalizeMeeting(raw, index = 0) {
+function normalizeMeeting(raw, index = 0, { fallbackStatus = "已结束" } = {}) {
   const stateData = raw.state || {};
   const id = raw.id || raw.meeting_id || stateData.meeting_id || `mtg-${index + 1}`;
   const title = raw.title || raw.name || raw.projectName || raw.project_name || stateData.title || stateData.project_name || `会议 ${index + 1}`;
   const desc = raw.desc || raw.description || raw.objective || stateData.objective || "会议协同与交付生成";
-  const timeValue = raw.time || raw.startedAt || raw.started_at || raw.createdAt || raw.created_at;
-  const time = formatBackendDateTime(timeValue, "时间待后端更新");
-  const explicitStatus = raw.status || raw.phase || raw.lifecycle_status || raw.meeting_status || stateData.status;
-  const hasClosedMarker = Boolean(
-    raw.closed_at || raw.closedAt || raw.ended_at || raw.endedAt || raw.archived_at || raw.archivedAt
-    || stateData.closed_at || stateData.ended_at || raw.closed === true || raw.is_closed === true
-  );
+  const timeValue = raw.time || raw.startedAt || raw.started_at || raw.createdAt || raw.created_at
+    || stateData.startedAt || stateData.started_at || stateData.createdAt || stateData.created_at;
+  const rememberedTime = getRememberedMeetingTime(id);
+  if (timeValue && String(timeValue) !== String(rememberedTime)) rememberMeetingTime(id, String(timeValue));
+  const explicitStatus = raw.lifecycle_status || raw.meeting_status || stateData.lifecycle_status || stateData.meeting_status
+    || raw.status || raw.phase || stateData.status;
+  const hasClosedMarker = hasMeetingClosedMarker(raw);
   const rememberedStatus = getRememberedMeetingStatus(id);
+  let status = hasClosedMarker ? "已结束" : normalizeStatus(explicitStatus, rememberedStatus || fallbackStatus);
+  if (!hasClosedMarker && rememberedStatus === "进行中" && isAmbiguousCompletionStatus(explicitStatus)) {
+    status = "进行中";
+  }
   return {
     id,
     title,
     desc,
-    time,
-    status: hasClosedMarker ? "已结束" : normalizeStatus(explicitStatus, rememberedStatus || "已结束"),
+    time: formatBackendDateTime(timeValue || rememberedTime, "时间待后端更新"),
+    status,
     cover: raw.cover || ""
   };
 }
@@ -731,6 +810,107 @@ function normalizeMeeting(raw, index = 0) {
 function normalizeMeetingsResponse(payload) {
   const list = Array.isArray(payload) ? payload : payload?.meetings || payload?.items || payload?.data || [];
   return list.map(normalizeMeeting);
+}
+
+function normalizeTemplateStringList(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+}
+
+function normalizeIndustryTemplate(raw, index = 0) {
+  const id = String(raw?.id || raw?.template_id || `template-${index + 1}`);
+  return {
+    id,
+    name: String(raw?.name || raw?.title || `行业模板 ${index + 1}`),
+    industry: String(raw?.industry || ""),
+    scenario: String(raw?.scenario || ""),
+    summary: String(raw?.summary || raw?.description || ""),
+    tags: normalizeTemplateStringList(raw?.tags),
+    roles: normalizeTemplateStringList(raw?.roles),
+    modules: normalizeTemplateStringList(raw?.modules),
+    featured: Boolean(raw?.featured),
+    sortOrder: Number(raw?.sort_order || raw?.sortOrder || 0),
+    updatedAt: String(raw?.updated_at || raw?.updatedAt || ""),
+    coverUrl: String(raw?.cover_url || raw?.coverUrl || ""),
+    previewUrl: String(raw?.preview_url || raw?.previewUrl || "")
+  };
+}
+
+function normalizeIndustryTemplateListResponse(payload) {
+  const list = Array.isArray(payload)
+    ? payload
+    : payload?.templates || payload?.items || payload?.data?.templates || [];
+  return {
+    templates: Array.isArray(list) ? list.map(normalizeIndustryTemplate) : [],
+    total: Number(payload?.total ?? list?.length ?? 0),
+    page: Math.max(1, Number(payload?.page || 1)),
+    pageSize: Math.max(1, Number(payload?.page_size || payload?.pageSize || state.templatePageSize)),
+    industries: normalizeTemplateStringList(payload?.industries)
+  };
+}
+
+function getIndustryTemplate(templateId = state.selectedTemplateId) {
+  if (state.templateDetail?.id === templateId) return state.templateDetail;
+  return industryTemplates.find((item) => item.id === templateId) || null;
+}
+
+function revokeTemplateObjectUrl(url) {
+  if (!url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  URL.revokeObjectURL(url);
+}
+
+function clearIndustryTemplatePreview() {
+  templatePreviewLoadSequence += 1;
+  templatePreviewAbortController?.abort();
+  templatePreviewAbortController = null;
+  const previousUrl = state.templatePreviewUrl;
+  state.templatePreviewUrl = "";
+  state.templatePreviewStatus = "idle";
+  state.templatePreviewError = "";
+  revokeTemplateObjectUrl(previousUrl);
+}
+
+function clearIndustryTemplateAssets({ covers = true } = {}) {
+  clearIndustryTemplatePreview();
+  templateAssetGeneration += 1;
+  if (templateAssetRenderFrame) window.cancelAnimationFrame(templateAssetRenderFrame);
+  templateAssetRenderFrame = 0;
+  if (!covers) return;
+  for (const url of templateCoverUrls.values()) revokeTemplateObjectUrl(url);
+  templateCoverUrls.clear();
+  templateCoverStates.clear();
+}
+
+function scheduleIndustryTemplateAssetRender() {
+  if (templateAssetRenderFrame) return;
+  templateAssetRenderFrame = window.requestAnimationFrame(() => {
+    templateAssetRenderFrame = 0;
+    if (state.view === "templates" || state.modal === "template-detail") render();
+  });
+}
+
+function pruneIndustryTemplateCovers(templateIds) {
+  const activeIds = new Set(templateIds);
+  for (const [templateId, url] of templateCoverUrls.entries()) {
+    if (activeIds.has(templateId)) continue;
+    revokeTemplateObjectUrl(url);
+    templateCoverUrls.delete(templateId);
+    templateCoverStates.delete(templateId);
+  }
+}
+
+function industryTemplateErrorMessage(error, fallback = "行业模板加载失败") {
+  if (error?.status === 401) return "登录已失效，请重新登录";
+  if (error?.status === 403) return "当前账号无权访问行业模板";
+  if (error?.status === 404) return "行业模板不存在或已下架";
+  if (error?.code === "ETIMEDOUT") return "请求超时，请稍后重试";
+  return `${fallback}：${error?.message || "未知错误"}`;
+}
+
+function createTemplateRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  return `tpl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function normalizeMaterialType(value) {
@@ -999,21 +1179,127 @@ function getSelectedDemoVersion() {
   return demoVersions.find((item) => item.version === selected) || demoVersions[0] || null;
 }
 
+function isDemoDeliverableReady(deliverable) {
+  return Boolean(deliverable && ["已完成", "ready", "available", "generated", "stored", "complete", "completed"]
+    .some((status) => String(deliverable.status || "").toLowerCase().includes(status.toLowerCase())));
+}
+
+function revokeDemoPreviewUrl(url) {
+  if (!url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  URL.revokeObjectURL(url);
+}
+
+function clearDemoPreview({ status = "idle", error = "" } = {}) {
+  demoPreviewLoadSequence += 1;
+  demoPreviewAbortController?.abort();
+  demoPreviewAbortController = null;
+  const previousUrl = state.demoPreviewUrl;
+  state.demoPreviewMeetingId = "";
+  state.demoPreviewVersion = "";
+  state.demoPreviewUrl = "";
+  state.demoPreviewStatus = status;
+  state.demoPreviewError = error;
+  revokeDemoPreviewUrl(previousUrl);
+}
+
+function shouldLoadDemoPreview() {
+  if (state.view === "summary") return true;
+  if (state.view !== "meeting" || state.stageTab !== "deliverable") return false;
+  return canonicalDeliverableKind(getSelectedDeliverable()?.kind) === "demo";
+}
+
+function demoPreviewErrorMessage(error) {
+  if (error?.status === 403) return "无权访问该会议的 Demo";
+  if (error?.status === 404) return "所选 Demo 版本不存在或尚未生成";
+  if (error?.status === 401) return "登录已失效，请重新登录";
+  return `Demo 加载失败：${error?.message || "未知错误"}`;
+}
+
+function prepareDemoPreviewHtml(value) {
+  const source = String(value || "");
+  const scrollbarStyle = `<style data-vpbuddy-demo-preview-ui>
+    html, body { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar {
+      width: 0 !important;
+      height: 0 !important;
+      display: none !important;
+    }
+  </style>`;
+  return /<\/head\s*>/i.test(source)
+    ? source.replace(/<\/head\s*>/i, `${scrollbarStyle}</head>`)
+    : `${scrollbarStyle}${source}`;
+}
+
+async function loadDemoPreviewContent(meetingId = state.selectedMeetingId, { force = false } = {}) {
+  const deliverable = deliverables.find((item) => canonicalDeliverableKind(item.kind) === "demo");
+  const selected = getSelectedDemoVersion();
+  const version = selected?.version;
+  if (!meetingId || !Number.isFinite(version) || !isDemoDeliverableReady(deliverable) || !shouldLoadDemoPreview()) {
+    clearDemoPreview();
+    return;
+  }
+
+  const samePreview = state.demoPreviewMeetingId === meetingId && Number(state.demoPreviewVersion) === Number(version);
+  if (!force && samePreview && ["loading", "ready"].includes(state.demoPreviewStatus)) return;
+
+  const loadSequence = ++demoPreviewLoadSequence;
+  demoPreviewAbortController?.abort();
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  demoPreviewAbortController = controller;
+  const previousUrl = state.demoPreviewUrl;
+  state.demoPreviewMeetingId = meetingId;
+  state.demoPreviewVersion = version;
+  state.demoPreviewUrl = "";
+  state.demoPreviewStatus = "loading";
+  state.demoPreviewError = "";
+  render();
+  revokeDemoPreviewUrl(previousUrl);
+
+  try {
+    const html = await api.getDemoVersionContent(meetingId, version, { signal: controller?.signal });
+    if (!String(html || "").trim()) throw new Error("后端返回了空的 Demo 内容");
+    const previewHtml = prepareDemoPreviewHtml(html);
+    const blobUrl = URL.createObjectURL(new Blob([previewHtml], { type: "text/html;charset=utf-8" }));
+    const selectedVersion = getSelectedDemoVersion()?.version;
+    if (
+      loadSequence !== demoPreviewLoadSequence
+      || meetingId !== state.selectedMeetingId
+      || Number(version) !== Number(selectedVersion)
+      || !shouldLoadDemoPreview()
+    ) {
+      revokeDemoPreviewUrl(blobUrl);
+      return;
+    }
+    state.demoPreviewUrl = blobUrl;
+    state.demoPreviewStatus = "ready";
+    state.demoPreviewError = "";
+    state.demoVersionMessage = "";
+  } catch (error) {
+    if (error?.name === "AbortError" || loadSequence !== demoPreviewLoadSequence) return;
+    state.demoPreviewUrl = "";
+    state.demoPreviewStatus = "error";
+    state.demoPreviewError = demoPreviewErrorMessage(error);
+  } finally {
+    if (loadSequence === demoPreviewLoadSequence) demoPreviewAbortController = null;
+  }
+  render();
+}
+
 function getDemoPreviewState(deliverable = deliverables.find((item) => canonicalDeliverableKind(item.kind) === "demo")) {
   const selected = getSelectedDemoVersion();
   const versionLabel = selected?.label || normalizeVersionLabel(deliverable?.version) || "V1";
-  const file = selected?.file || "demo_latest.html";
-  const isReady = Boolean(deliverable && ["已完成", "ready", "available", "generated", "stored", "complete", "completed"]
-    .some((status) => String(deliverable.status || "").toLowerCase().includes(status.toLowerCase())));
-  const url = isReady
-    ? `${apiBaseUrl.replace(/\/$/, "")}/docs/${encodeURIComponent(state.selectedMeetingId)}/${encodeURIComponent(file)}?v=${encodeURIComponent(versionLabel)}`
-    : "";
+  const version = selected?.version ?? "";
+  const samePreview = state.demoPreviewMeetingId === state.selectedMeetingId
+    && Number(state.demoPreviewVersion) === Number(version);
+  const status = isDemoDeliverableReady(deliverable) && samePreview ? state.demoPreviewStatus : "idle";
   return {
     selected,
     versionLabel,
-    file,
-    url,
-    frameKey: `${state.selectedMeetingId || "meeting"}:${file}:${versionLabel}`
+    version,
+    status,
+    error: samePreview ? state.demoPreviewError : "",
+    url: status === "ready" ? state.demoPreviewUrl : "",
+    frameKey: `${state.selectedMeetingId || "meeting"}:${version || versionLabel}`
   };
 }
 
@@ -1101,15 +1387,21 @@ function resetAuthenticatedSession(message = "") {
   toastTimer = 0;
   if (knowledgeSearchTimer) window.clearTimeout(knowledgeSearchTimer);
   knowledgeSearchTimer = 0;
+  if (templateSearchTimer) window.clearTimeout(templateSearchTimer);
+  templateSearchTimer = 0;
   meetingDetailLoadSequence += 1;
   materialPreviewLoadSequence += 1;
+  templateListLoadSequence += 1;
+  templateDetailLoadSequence += 1;
   meetingMaterialsRevision += 1;
   vpbuddyChatRequestSequence += 1;
   closeMeetingEvents();
   resetRecordingState();
   clearPresentationPreview();
+  clearDemoPreview();
+  clearIndustryTemplateAssets();
   clearMaterialPreviewDownloadCache();
-  for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, todoItems]) {
+  for (const collection of [meetings, materials, timeline, meetingRecords, meetingUnderstanding, aiFollowupQuestions, deliverables, demoVersions, conceptSources, explanationFindings, knowledgeDocs, industryTemplates, todoItems]) {
     replaceArray(collection, []);
   }
   transcriptRecordStore.setOwner("");
@@ -1124,6 +1416,22 @@ function resetAuthenticatedSession(message = "") {
   state.meetingDetailLoading = false;
   state.loadedMeetingDetailId = "";
   state.selectedKnowledge = "";
+  state.templateQuery = "";
+  state.templateIndustry = "";
+  state.templateSort = "default";
+  state.templatePage = 1;
+  state.templateStatus = "idle";
+  state.templateError = "";
+  state.templateTotal = 0;
+  state.templateIndustries = [];
+  state.selectedTemplateId = "";
+  state.templateDetail = null;
+  state.templateDetailStatus = "idle";
+  state.templateDetailError = "";
+  state.applyingTemplateId = "";
+  state.templateApplyRequestId = "";
+  state.templateApplyRequestTemplateId = "";
+  state.templateApplyError = "";
   state.showAccountMenu = false;
   state.showDeliverableDownloadMenu = false;
   state.downloadBusyMode = "";
@@ -1226,6 +1534,337 @@ function renderEmptyState(title, description = "", modifier = "") {
   `;
 }
 
+function renderDemoPreviewStatus(preview, { modifier = "", emptyMessage = "Demo 尚未生成可预览版本" } = {}) {
+  if (preview?.status === "loading") {
+    return `
+      <div class="demo-preview-status is-loading ${modifier}" role="status" aria-live="polite">
+        <span class="meeting-loading-spinner" aria-hidden="true"></span>
+        <strong>正在安全加载 Demo</strong>
+        <p>正在通过会议所有者鉴权接口读取 ${escapeHtml(preview.versionLabel)}。</p>
+      </div>
+    `;
+  }
+  if (preview?.status === "error") {
+    return `
+      <div class="demo-preview-status is-error ${modifier}" role="alert">
+        <strong>Demo 暂时无法显示</strong>
+        <p>${escapeHtml(preview.error || "加载失败，请稍后重试")}</p>
+        <button class="ghost small" data-action="retry-demo-preview">重新加载</button>
+      </div>
+    `;
+  }
+  return renderEmptyState("Demo 暂不可预览", emptyMessage, modifier);
+}
+
+async function loadIndustryTemplateCover(template) {
+  if (!template?.id || templateCoverStates.get(template.id) === "loading" || templateCoverUrls.has(template.id)) return;
+  const generation = templateAssetGeneration;
+  templateCoverStates.set(template.id, "loading");
+  try {
+    const download = await api.getTemplateCover(template.id);
+    const blobUrl = URL.createObjectURL(download.blob);
+    if (generation !== templateAssetGeneration || !industryTemplates.some((item) => item.id === template.id)) {
+      revokeTemplateObjectUrl(blobUrl);
+      return;
+    }
+    const previousUrl = templateCoverUrls.get(template.id);
+    if (previousUrl) revokeTemplateObjectUrl(previousUrl);
+    templateCoverUrls.set(template.id, blobUrl);
+    templateCoverStates.set(template.id, "ready");
+  } catch (error) {
+    if (generation !== templateAssetGeneration) return;
+    templateCoverStates.set(template.id, "error");
+    recordClientLog("warn", "Industry template cover failed", {
+      template_id: template.id,
+      message: error?.message || "unknown"
+    });
+  }
+  scheduleIndustryTemplateAssetRender();
+}
+
+function loadVisibleIndustryTemplateCovers() {
+  for (const template of industryTemplates) void loadIndustryTemplateCover(template);
+}
+
+async function loadIndustryTemplates({ force = false } = {}) {
+  if (!hasBackendSession()) return;
+  if (!force && state.templateStatus === "ready") {
+    loadVisibleIndustryTemplateCovers();
+    return;
+  }
+  if (state.templateStatus === "loading" && !force) return;
+  const loadSequence = ++templateListLoadSequence;
+  state.templateStatus = "loading";
+  state.templateError = "";
+  render();
+  try {
+    const payload = await api.listTemplates({
+      q: state.templateQuery.trim(),
+      industry: state.templateIndustry,
+      sort: state.templateSort,
+      page: state.templatePage,
+      pageSize: state.templatePageSize
+    });
+    if (loadSequence !== templateListLoadSequence) return;
+    const normalized = normalizeIndustryTemplateListResponse(payload);
+    replaceArray(industryTemplates, normalized.templates);
+    state.templateTotal = normalized.total;
+    state.templatePage = normalized.page;
+    state.templatePageSize = normalized.pageSize;
+    state.templateIndustries = normalized.industries;
+    state.templateStatus = "ready";
+    state.templateError = "";
+    pruneIndustryTemplateCovers(industryTemplates.map((item) => item.id));
+    render();
+    loadVisibleIndustryTemplateCovers();
+  } catch (error) {
+    if (loadSequence !== templateListLoadSequence) return;
+    state.templateStatus = "error";
+    state.templateError = industryTemplateErrorMessage(error);
+    if (!industryTemplates.length) state.templateTotal = 0;
+    render();
+  }
+}
+
+function scheduleIndustryTemplateSearch() {
+  if (templateSearchTimer) window.clearTimeout(templateSearchTimer);
+  templateSearchTimer = window.setTimeout(() => {
+    state.templatePage = 1;
+    void loadIndustryTemplates({ force: true });
+  }, 320);
+}
+
+async function loadIndustryTemplateDetail(templateId) {
+  const loadSequence = ++templateDetailLoadSequence;
+  state.templateDetailStatus = "loading";
+  state.templateDetailError = "";
+  render();
+  try {
+    const payload = await api.getTemplateDetail(templateId);
+    if (loadSequence !== templateDetailLoadSequence || state.selectedTemplateId !== templateId) return;
+    const summary = industryTemplates.find((item) => item.id === templateId) || {};
+    const detail = normalizeIndustryTemplate(payload);
+    state.templateDetail = {
+      ...summary,
+      ...detail,
+      tags: detail.tags.length ? detail.tags : summary.tags || [],
+      roles: detail.roles,
+      modules: detail.modules
+    };
+    state.templateDetailStatus = "ready";
+  } catch (error) {
+    if (loadSequence !== templateDetailLoadSequence || state.selectedTemplateId !== templateId) return;
+    state.templateDetailStatus = "error";
+    state.templateDetailError = industryTemplateErrorMessage(error, "模板详情加载失败");
+  }
+  render();
+}
+
+function prepareIndustryTemplatePreviewHtml(value) {
+  const source = String(value || "");
+  const scrollbarStyle = `<style data-vpbuddy-preview-ui>
+    html, body { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
+      width: 0 !important;
+      height: 0 !important;
+      display: none !important;
+    }
+  </style>`;
+  return /<\/head\s*>/i.test(source)
+    ? source.replace(/<\/head\s*>/i, `${scrollbarStyle}</head>`)
+    : `${scrollbarStyle}${source}`;
+}
+
+async function loadIndustryTemplatePreview(templateId) {
+  const loadSequence = ++templatePreviewLoadSequence;
+  templatePreviewAbortController?.abort();
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  templatePreviewAbortController = controller;
+  const previousUrl = state.templatePreviewUrl;
+  state.templatePreviewUrl = "";
+  state.templatePreviewStatus = "loading";
+  state.templatePreviewError = "";
+  revokeTemplateObjectUrl(previousUrl);
+  render();
+  try {
+    const previewHtml = await api.getTemplatePreview(templateId, { signal: controller?.signal });
+    if (!String(previewHtml || "").trim()) throw new Error("后端返回了空的模板预览");
+    const html = prepareIndustryTemplatePreviewHtml(previewHtml);
+    const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+    if (
+      loadSequence !== templatePreviewLoadSequence
+      || state.selectedTemplateId !== templateId
+      || state.modal !== "template-detail"
+    ) {
+      revokeTemplateObjectUrl(blobUrl);
+      return;
+    }
+    state.templatePreviewUrl = blobUrl;
+    state.templatePreviewStatus = "ready";
+  } catch (error) {
+    if (error?.name === "AbortError" || loadSequence !== templatePreviewLoadSequence) return;
+    state.templatePreviewStatus = "error";
+    state.templatePreviewError = industryTemplateErrorMessage(error, "模板预览加载失败");
+  } finally {
+    if (loadSequence === templatePreviewLoadSequence) templatePreviewAbortController = null;
+  }
+  render();
+}
+
+async function openIndustryTemplateDetail(templateId) {
+  const template = industryTemplates.find((item) => item.id === templateId);
+  if (!template) return;
+  clearIndustryTemplatePreview();
+  state.selectedTemplateId = templateId;
+  state.templateDetail = template;
+  state.templateDetailStatus = "loading";
+  state.templateDetailError = "";
+  state.modal = "template-detail";
+  render();
+  void loadIndustryTemplateCover(template);
+  await Promise.allSettled([
+    loadIndustryTemplateDetail(templateId),
+    loadIndustryTemplatePreview(templateId)
+  ]);
+}
+
+function templateApplyErrorMessage(error) {
+  const code = error?.payload?.detail?.code || error?.payload?.code || "";
+  if (code === "template_not_found" || error?.status === 404) return "模板不存在或已下架";
+  if (code === "meeting_conflict" || error?.status === 409) return "目标会议已经存在 Demo，无法重复应用模板";
+  if (code === "forbidden" || error?.status === 403) return "当前账号无权应用该模板";
+  if (code === "demo_init_failed") return "Demo 初始化失败，请重试";
+  if (error?.code === "ETIMEDOUT") return "模板应用仍在处理中，状态确认失败，请重试";
+  return `模板应用失败：${error?.message || "未知错误"}`;
+}
+
+async function recoverIndustryTemplateApplication(requestId) {
+  if (!requestId) return null;
+  try {
+    const result = await api.getTemplateApplication(requestId);
+    return result?.status === "success" && result?.meeting_id ? result : null;
+  } catch (error) {
+    if (error?.status !== 404) recordClientLog("warn", "Template application recovery failed", {
+      request_id: requestId,
+      message: error?.message || "unknown"
+    });
+    return null;
+  }
+}
+
+async function openAppliedTemplateMeeting(result, template) {
+  const meetingId = result?.meeting_id;
+  if (!meetingId) throw new Error("后端未返回新会议 ID");
+  const appliedAt = result?.created_at || result?.createdAt || new Date().toISOString();
+  const fallbackMeeting = {
+    meeting_id: meetingId,
+    project_name: template?.name || "行业模板会议",
+    description: template?.summary || "由行业模板创建",
+    created_at: appliedAt
+  };
+  let meetingSource = fallbackMeeting;
+  try {
+    const detail = await api.getMeeting(meetingId);
+    const detailState = detail?.state || {};
+    meetingSource = {
+      ...fallbackMeeting,
+      ...detail,
+      state: detailState,
+      project_name: detail?.project_name || detail?.projectName || detail?.title || detail?.name
+        || detailState.project_name || detailState.title || fallbackMeeting.project_name,
+      description: detail?.description || detail?.desc || detail?.objective || detailState.objective
+        || fallbackMeeting.description,
+      created_at: detail?.created_at || detail?.createdAt || detail?.started_at || detail?.startedAt
+        || detailState.created_at || detailState.createdAt || appliedAt
+    };
+  } catch (error) {
+    recordClientLog("warn", "Applied template meeting detail not immediately available", {
+      meeting_id: meetingId,
+      message: error?.message || "unknown"
+    });
+  }
+  const meeting = normalizeMeeting(meetingSource, 0, { fallbackStatus: "进行中" });
+  if (!hasMeetingClosedMarker(meetingSource)) meeting.status = "进行中";
+  rememberMeetingStatus(meeting.id, meeting.status);
+  rememberMeetingTime(meeting.id, meetingSource.created_at || appliedAt);
+  upsertMeeting(meeting);
+  clearIndustryTemplatePreview();
+  clearDemoPreview();
+  resetRecordingState();
+  state.modal = "";
+  state.selectedMeetingId = meetingId;
+  state.loadedMeetingDetailId = "";
+  state.view = "meeting";
+  state.stageTab = "deliverable";
+  state.deliverableLeftTab = "deliverables";
+  state.meetingLeftTab = "records";
+  state.selectedDeliverable = "";
+  state.selectedDemoVersion = Number(result?.demo?.version) || 1;
+  state.demoVersionPinned = true;
+  state.meetingDetailLoading = true;
+  render();
+  startMeetingEvents(meetingId);
+  await loadMeetingDetailFromBackend(meetingId);
+  if (!deliverables.some((item) => canonicalDeliverableKind(item.kind) === "demo")) {
+    deliverables.unshift(normalizeDeliverable({
+      id: `del-${meetingId}-demo`,
+      kind: "demo",
+      name: "Demo",
+      status: "completed",
+      version: result?.demo?.version || 1,
+      description: "由行业模板初始化"
+    }));
+  }
+  if (!demoVersions.some((item) => Number(item.version) === Number(result?.demo?.version || 1))) {
+    applyDemoVersions([{ version: result?.demo?.version || 1, summary: `${template?.name || "模板"} 初始版本` }]);
+  }
+  state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+  state.selectedDemoVersion = Number(result?.demo?.version) || demoVersions[0]?.version || 1;
+  state.demoVersionPinned = true;
+  render();
+  await loadDemoPreviewContent(meetingId, { force: true });
+}
+
+async function applyIndustryTemplate(templateId) {
+  if (state.applyingTemplateId) return;
+  const template = getIndustryTemplate(templateId);
+  if (!template) return;
+  const canReuseRequest = state.templateApplyRequestTemplateId === templateId && state.templateApplyRequestId;
+  const requestId = canReuseRequest ? state.templateApplyRequestId : createTemplateRequestId();
+  state.templateApplyRequestId = requestId;
+  state.templateApplyRequestTemplateId = templateId;
+  state.applyingTemplateId = templateId;
+  state.templateApplyError = "";
+  render();
+  try {
+    let result;
+    try {
+      result = await api.applyTemplate(templateId, {
+        project_name: template.name,
+        request_id: requestId
+      });
+    } catch (error) {
+      result = await recoverIndustryTemplateApplication(requestId);
+      if (!result) throw error;
+    }
+    if (result?.status !== "success" || !result?.meeting_id) {
+      const error = new Error(result?.error || result?.code || "后端未完成模板应用");
+      error.payload = result;
+      throw error;
+    }
+    state.templateApplyRequestId = "";
+    state.templateApplyRequestTemplateId = "";
+    state.applyingTemplateId = "";
+    setToast(result.reused ? "已恢复模板应用结果，正在进入 Demo" : "模板已应用，正在进入 Demo", false);
+    await openAppliedTemplateMeeting(result, template);
+  } catch (error) {
+    state.applyingTemplateId = "";
+    state.templateApplyError = templateApplyErrorMessage(error);
+    setToast(state.templateApplyError, false);
+    render();
+  }
+}
+
 async function loadMeetingsFromBackend() {
   setApiStatus("loading", "连接后端中");
   render();
@@ -1250,6 +1889,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   const hasCachedDetail = state.loadedMeetingDetailId === meetingId;
   state.meetingDetailLoading = !hasCachedDetail;
   if (!hasCachedDetail) {
+    clearDemoPreview();
     restoreTranscriptRecords(meetingId);
     replaceArray(materials, []);
     replaceArray(deliverables, []);
@@ -1382,6 +2022,7 @@ async function loadMeetingDetailFromBackend(meetingId) {
   state.loadedMeetingDetailId = meetingId;
   state.meetingDetailLoading = false;
   render();
+  void loadDemoPreviewContent(meetingId);
 }
 
 async function loadKnowledgeFromBackend() {
@@ -2197,13 +2838,16 @@ async function startNewMeetingFromForm() {
 
   try {
     const payload = await api.createMeeting({ projectName: title, audioSource: "web" });
+    const meetingPayload = payload?.meeting || payload;
+    const createdAt = meetingPayload?.created_at || meetingPayload?.createdAt || new Date().toISOString();
     const meeting = {
-      ...normalizeMeeting(payload?.meeting || payload, 0),
+      ...normalizeMeeting({ ...meetingPayload, created_at: createdAt }, 0),
       title,
       desc: projectName || "会议协同与交付生成",
       status: "进行中"
     };
     rememberMeetingStatus(meeting.id, meeting.status);
+    rememberMeetingTime(meeting.id, createdAt);
     upsertMeeting(meeting);
     state.selectedMeetingId = meeting.id;
     state.showCreate = false;
@@ -2269,6 +2913,7 @@ async function deleteMeetingById(meetingId) {
     forgetMeetingStatus(meetingId);
     transcriptRecordStore.remove(meetingId);
     if (state.selectedMeetingId === meetingId) {
+      clearDemoPreview();
       state.selectedMeetingId = meetings[0]?.id || "";
       resetRecordingState();
       closeMeetingEvents();
@@ -2858,6 +3503,108 @@ function renderShell(content) {
       <section class="shell-main">${content}</section>
     </main>
   `;
+}
+
+function renderIndustryTemplateCover(template, { detail = false } = {}) {
+  const coverUrl = templateCoverUrls.get(template.id);
+  const coverState = templateCoverStates.get(template.id) || "idle";
+  if (coverUrl) {
+    return `<img src="${escapeHtml(coverUrl)}" alt="${escapeHtml(template.name)} 模板封面" />`;
+  }
+  if (coverState === "error") {
+    return `<div class="template-cover-placeholder is-error">${icon("monitor", detail ? 36 : 30)}<span>封面暂不可用</span></div>`;
+  }
+  return `<div class="template-cover-placeholder is-loading" role="status"><i></i><span>正在加载封面</span></div>`;
+}
+
+function renderIndustryTemplateCard(template) {
+  const applying = state.applyingTemplateId === template.id;
+  const locked = Boolean(state.applyingTemplateId);
+  return `
+    <article class="industry-template-card panel">
+      <div class="industry-template-cover">
+        ${renderIndustryTemplateCover(template)}
+        ${template.featured ? `<span class="template-featured">推荐</span>` : ""}
+      </div>
+      <div class="industry-template-copy">
+        <div class="industry-template-title-row">
+          <h2>${escapeHtml(template.name)}</h2>
+          ${template.industry ? `<span>${escapeHtml(template.industry)}</span>` : ""}
+        </div>
+        ${template.scenario ? `<p class="template-scenario">${escapeHtml(template.scenario)}</p>` : ""}
+        <p class="template-summary">${escapeHtml(template.summary || "打开详情查看模板能力与适用场景。")}</p>
+        ${template.tags.length ? `<div class="template-tags">${template.tags.slice(0, 3).map((tag) => `<em>${escapeHtml(tag)}</em>`).join("")}</div>` : ""}
+      </div>
+      <footer>
+        <button class="ghost" data-action="template-detail" data-id="${escapeHtml(template.id)}" ${locked ? "disabled" : ""}>${icon("monitor", 18)}查看详情</button>
+        <button class="primary" data-action="template-apply" data-id="${escapeHtml(template.id)}" ${locked ? "disabled" : ""}>${applying ? `<span class="button-spinner"></span>正在创建` : `${icon("sparkle", 18)}使用模板`}</button>
+      </footer>
+    </article>
+  `;
+}
+
+function renderIndustryTemplateSkeletons() {
+  return Array.from({ length: state.templatePageSize }, (_, index) => `
+    <article class="industry-template-card template-card-skeleton panel" aria-hidden="true" data-skeleton="${index + 1}">
+      <span class="template-skeleton-cover"></span>
+      <div><span></span><span></span><span></span></div>
+      <footer><span></span><span></span></footer>
+    </article>
+  `).join("");
+}
+
+function renderIndustryTemplates() {
+  const pageCount = Math.max(1, Math.ceil(state.templateTotal / state.templatePageSize));
+  const firstLoad = state.templateStatus === "loading" && !industryTemplates.length;
+  const body = `
+    <header class="page-header template-page-header">
+      <div>
+        <h1>行业模板</h1>
+        <p>网页生成模板 · ${state.templateStatus === "idle" ? "--" : state.templateTotal} 个</p>
+      </div>
+    </header>
+    <section class="template-toolbar" aria-label="模板检索与排序">
+      <label class="field template-search-field">
+        ${icon("search", 20)}
+        <input class="template-search-input" value="${escapeHtml(state.templateQuery)}" placeholder="搜索行业、场景或模板名称" />
+      </label>
+      <label class="template-sort-control">
+        <span>排序</span>
+        <select class="template-sort-select" aria-label="模板排序">
+          <option value="default" ${state.templateSort === "default" ? "selected" : ""}>综合排序</option>
+          <option value="updated" ${state.templateSort === "updated" ? "selected" : ""}>最近更新</option>
+        </select>
+      </label>
+    </section>
+    <nav class="template-industry-tabs" aria-label="行业分类">
+      <button class="${state.templateIndustry ? "" : "active"}" data-action="template-industry" data-industry="">全部</button>
+      ${state.templateIndustries.map((industry) => `
+        <button class="${state.templateIndustry === industry ? "active" : ""}" data-action="template-industry" data-industry="${escapeHtml(industry)}">${escapeHtml(industry)}</button>
+      `).join("")}
+    </nav>
+    ${state.templateStatus === "loading" && industryTemplates.length ? `<div class="template-refresh-state" role="status"><i></i>正在更新模板列表</div>` : ""}
+    ${state.templateError && industryTemplates.length ? `<div class="template-inline-error" role="alert">${escapeHtml(state.templateError)}<button data-action="template-retry">重试</button></div>` : ""}
+    <section class="industry-template-grid" aria-busy="${state.templateStatus === "loading"}">
+      ${firstLoad
+        ? renderIndustryTemplateSkeletons()
+        : industryTemplates.length
+          ? industryTemplates.map(renderIndustryTemplateCard).join("")
+          : state.templateStatus === "error"
+            ? `<div class="template-page-state">${icon("refresh", 28)}<strong>模板列表暂时无法加载</strong><p>${escapeHtml(state.templateError)}</p><button class="primary" data-action="template-retry">重新加载</button></div>`
+            : `<div class="template-page-state">${icon("search", 28)}<strong>没有匹配的行业模板</strong><p>调整关键词或行业分类后再试。</p><button class="ghost" data-action="template-clear-filter">清除筛选</button></div>`}
+    </section>
+    ${state.templateTotal > state.templatePageSize ? `
+      <footer class="template-pagination">
+        <span>共 ${state.templateTotal} 个模板</span>
+        <div>
+          <button data-action="template-page" data-page="${state.templatePage - 1}" ${state.templatePage <= 1 || state.templateStatus === "loading" ? "disabled" : ""} aria-label="上一页">${icon("arrowLeft", 18)}</button>
+          <strong>${state.templatePage} / ${pageCount}</strong>
+          <button data-action="template-page" data-page="${state.templatePage + 1}" ${state.templatePage >= pageCount || state.templateStatus === "loading" ? "disabled" : ""} aria-label="下一页">${icon("arrowRight", 18)}</button>
+        </div>
+      </footer>
+    ` : ""}
+  `;
+  return renderShell(body);
 }
 
 function renderWorkspace() {
@@ -3452,7 +4199,6 @@ function renderDeliverableCanvas() {
     .map((value) => String(value || "").trim())
     .find((value) => value && value !== bodyContent) || "后端生成文档";
   const displayedVersion = selectedDemo?.label || current.version;
-  const previewFile = selectedDemo?.file || "demo_latest.html";
   const demoPreview = isDemoDeliverable ? getDemoPreviewState(current) : null;
   const demoPreviewUrl = demoPreview?.url || "";
   return `
@@ -3464,7 +4210,7 @@ function renderDeliverableCanvas() {
         ${renderDeliverableDownloadMenu(current)}
       </div>
     </div>
-    <section class="deliverable-doc ${demoPreviewUrl ? "demo-deliverable-doc" : ""}">
+    <section class="deliverable-doc ${isDemoDeliverable ? "demo-deliverable-doc" : ""}">
       ${hasTextBody ? "" : `
         <header class="${isTextOnlyDeliverable ? "text-only-deliverable-header" : ""}">
           ${isTextOnlyDeliverable ? "" : docBadge(current.type)}
@@ -3472,20 +4218,25 @@ function renderDeliverableCanvas() {
           ${isDemoDeliverable || isTextOnlyDeliverable ? "" : `<span>${escapeHtml(displayedVersion)}</span>`}
         </header>
       `}
-      ${demoPreviewUrl
-        ? `<iframe
-            class="deliverable-demo-preview"
-            src="${escapeHtml(demoPreviewUrl)}"
-            data-stable-demo-frame="meeting-demo"
-            title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
-            sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
-            referrerpolicy="no-referrer"
-          ></iframe>`
+      ${isDemoDeliverable
+        ? demoPreviewUrl
+          ? `<iframe
+              class="deliverable-demo-preview"
+              src="${escapeHtml(demoPreviewUrl)}"
+              data-stable-demo-frame="meeting-demo"
+              title="${escapeHtml(`${current.name} ${displayedVersion} 预览`)}"
+              sandbox="allow-scripts allow-forms allow-modals"
+              referrerpolicy="no-referrer"
+            ></iframe>`
+          : renderDemoPreviewStatus(demoPreview, {
+              modifier: "deliverable-empty",
+              emptyMessage: state.demoVersionMessage || `${current.status || "后端尚未生成可用版本"}`
+            })
         : current.content
         ? isTextOnlyDeliverable
           ? `<article class="deliverable-content markdown-content">${renderMarkdown(current.content)}</article>`
           : `<pre class="deliverable-content">${escapeHtml(current.content)}</pre>`
-        : renderEmptyState("暂无在线正文预览", canonicalDeliverableKind(current.kind) === "demo" ? "交互 Demo 请下载 HTML 文件查看。" : "文档正文尚未生成或后端列表仅返回元数据。", "deliverable-empty")}
+        : renderEmptyState("暂无在线正文预览", "文档正文尚未生成或后端列表仅返回元数据。", "deliverable-empty")}
     </section>
   `;
 }
@@ -3660,14 +4411,13 @@ function renderSummaryDeliverable(item) {
               src="${escapeHtml(preview.url)}"
               data-stable-demo-frame="summary-demo"
               title="${escapeHtml(`${item.name || "Demo"} ${preview.versionLabel} 预览`)}"
-              sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+              sandbox="allow-scripts allow-forms allow-modals"
               referrerpolicy="no-referrer"
             ></iframe>`
-          : renderEmptyState(
-              "Demo 暂不可预览",
-              state.demoVersionMessage || `${item.status || "后端尚未生成可用版本"}`,
-              "summary-deliverable-empty"
-            )}
+          : renderDemoPreviewStatus(preview, {
+              modifier: "summary-deliverable-empty",
+              emptyMessage: state.demoVersionMessage || `${item.status || "后端尚未生成可用版本"}`
+            })}
       </article>
     `;
   }
@@ -3840,6 +4590,56 @@ function renderActionModal() {
   const selectedDeliverable = deliverables.find((item) => item.id === state.selectedDeliverable) || deliverables[0];
   const selectedKnowledge = getSelectedKnowledgeDoc() || knowledgeDocs[0];
   const selectedKnowledgeCallable = isKnowledgeCallable(selectedKnowledge);
+
+  if (state.modal === "template-detail") {
+    const template = getIndustryTemplate();
+    const applying = state.applyingTemplateId === template?.id;
+    const previewMarkup = state.templatePreviewStatus === "ready" && state.templatePreviewUrl
+      ? `<iframe
+          class="template-preview-frame"
+          data-stable-demo-frame="template-${escapeHtml(template?.id || "preview")}"
+          src="${escapeHtml(state.templatePreviewUrl)}"
+          title="${escapeHtml(template?.name || "行业模板")}在线预览"
+          sandbox="allow-scripts allow-forms allow-modals"
+        ></iframe>`
+      : state.templatePreviewStatus === "error"
+        ? `<div class="template-preview-state is-error"><strong>预览暂不可用</strong><p>${escapeHtml(state.templatePreviewError)}</p><button class="ghost" data-action="template-preview-retry" data-id="${escapeHtml(template?.id || "")}">重新加载</button></div>`
+        : `<div class="template-preview-state" role="status"><span class="meeting-loading-spinner"></span><strong>正在加载模板预览</strong><p>通过账号凭证安全读取预览内容</p></div>`;
+    return `
+      <div class="modal-backdrop action-backdrop">
+        <section class="action-modal panel template-detail-modal">
+          <button class="modal-close" data-action="close-modal" ${applying ? "disabled" : ""}>${icon("close")}</button>
+          ${template ? `
+            <header class="template-detail-header">
+              <div>
+                <span class="template-detail-kicker">${escapeHtml(template.industry || "行业模板")}${template.scenario ? ` · ${escapeHtml(template.scenario)}` : ""}</span>
+                <h2>${escapeHtml(template.name)}</h2>
+                <p>${escapeHtml(template.summary || "打开预览了解模板页面与交互内容。")}</p>
+              </div>
+              ${template.featured ? `<em class="template-featured">推荐</em>` : ""}
+            </header>
+            ${state.templateDetailStatus === "error" ? `<div class="template-inline-error" role="alert">${escapeHtml(state.templateDetailError)}<button data-action="template-detail-retry" data-id="${escapeHtml(template.id)}">重试</button></div>` : ""}
+            <div class="template-detail-layout">
+              <section class="template-preview-shell">${previewMarkup}</section>
+              <aside class="template-detail-meta">
+                ${template.tags?.length ? `<section><h3>模板标签</h3><div class="template-tags">${template.tags.map((tag) => `<em>${escapeHtml(tag)}</em>`).join("")}</div></section>` : ""}
+                ${template.roles?.length ? `<section><h3>适用角色</h3><ul>${template.roles.map((role) => `<li>${icon("check", 15)}${escapeHtml(role)}</li>`).join("")}</ul></section>` : ""}
+                ${template.modules?.length ? `<section><h3>包含模块</h3><ul>${template.modules.map((module) => `<li>${icon("check", 15)}${escapeHtml(module)}</li>`).join("")}</ul></section>` : ""}
+                ${state.templateDetailStatus === "loading" ? `<div class="template-meta-loading"><span></span><span></span><span></span></div>` : ""}
+              </aside>
+            </div>
+            ${state.templateApplyError ? `<p class="template-apply-error" role="alert">${escapeHtml(state.templateApplyError)}</p>` : ""}
+            <footer>
+              <button class="ghost" data-action="close-modal" ${applying ? "disabled" : ""}>关闭</button>
+              <button class="primary" data-action="template-apply" data-id="${escapeHtml(template.id)}" ${state.applyingTemplateId ? "disabled" : ""}>${applying ? `<span class="button-spinner"></span>正在创建会议与 Demo` : `${icon("sparkle", 18)}使用模板`}</button>
+            </footer>
+          ` : `
+            <div class="template-page-state"><strong>模板不存在</strong><p>返回列表重新选择模板。</p><button class="ghost" data-action="close-modal">关闭</button></div>
+          `}
+        </section>
+      </div>
+    `;
+  }
 
   if (state.modal === "delete-meeting") {
     const meeting = meetings.find((item) => item.id === state.pendingDeleteMeetingId);
@@ -4401,6 +5201,7 @@ document.addEventListener("click", async (event) => {
   if (action === "nav") {
     state.view = target.dataset.view;
     if (state.view !== "meeting") {
+      clearDemoPreview();
       resetMeetingTitleEditState();
       meetingDetailLoadSequence += 1;
       state.meetingDetailLoading = false;
@@ -4409,8 +5210,48 @@ document.addEventListener("click", async (event) => {
       document.body.classList.remove("stage-fullscreen-active");
     }
     render();
+    if (state.view === "templates") await loadIndustryTemplates();
     if (state.view === "knowledge") await loadKnowledgeFromBackend();
     if (state.view === "settings") await loadAISettings();
+    return;
+  }
+  if (action === "template-retry") {
+    await loadIndustryTemplates({ force: true });
+    return;
+  }
+  if (action === "template-clear-filter") {
+    state.templateQuery = "";
+    state.templateIndustry = "";
+    state.templatePage = 1;
+    await loadIndustryTemplates({ force: true });
+    return;
+  }
+  if (action === "template-industry") {
+    state.templateIndustry = target.dataset.industry || "";
+    state.templatePage = 1;
+    await loadIndustryTemplates({ force: true });
+    return;
+  }
+  if (action === "template-page") {
+    const pageCount = Math.max(1, Math.ceil(state.templateTotal / state.templatePageSize));
+    state.templatePage = clamp(Number(target.dataset.page) || 1, 1, pageCount);
+    await loadIndustryTemplates({ force: true });
+    return;
+  }
+  if (action === "template-detail") {
+    await openIndustryTemplateDetail(target.dataset.id);
+    return;
+  }
+  if (action === "template-detail-retry") {
+    await loadIndustryTemplateDetail(target.dataset.id || state.selectedTemplateId);
+    return;
+  }
+  if (action === "template-preview-retry") {
+    await loadIndustryTemplatePreview(target.dataset.id || state.selectedTemplateId);
+    return;
+  }
+  if (action === "template-apply") {
+    await applyIndustryTemplate(target.dataset.id || state.selectedTemplateId);
     return;
   }
   if (action === "modal") {
@@ -4418,6 +5259,13 @@ document.addEventListener("click", async (event) => {
     state.modal = target.dataset.modal;
   }
   if (action === "close-modal") {
+    if (state.modal === "template-detail") {
+      clearIndustryTemplatePreview();
+      templateDetailLoadSequence += 1;
+      state.templateDetailStatus = "idle";
+      state.templateDetailError = "";
+      state.templateApplyError = "";
+    }
     state.modal = "";
     state.pendingDeleteMeetingId = "";
     state.pendingDeleteKnowledgeId = "";
@@ -4466,6 +5314,7 @@ document.addEventListener("click", async (event) => {
     const preserveActiveRecording = nextMeetingId === state.selectedMeetingId
       && Boolean(realtimeAsrSession)
       && ["starting", "recording", "paused", "pausing", "resuming"].includes(state.recordingStatus);
+    clearDemoPreview();
     state.selectedMeetingId = nextMeetingId;
     if (!preserveActiveRecording) resetRecordingState();
     state.stageTab = "presentation";
@@ -4484,6 +5333,7 @@ document.addEventListener("click", async (event) => {
     resetMeetingTitleEditState();
     const nextMeetingId = target.dataset.id || state.selectedMeetingId;
     if (preventActiveRecordingMeetingSwitch(nextMeetingId)) return;
+    if (nextMeetingId !== state.selectedMeetingId) clearDemoPreview();
     state.selectedMeetingId = nextMeetingId;
     state.view = "summary";
     state.meetingDetailLoading = state.loadedMeetingDetailId !== state.selectedMeetingId;
@@ -4523,7 +5373,12 @@ document.addEventListener("click", async (event) => {
     if (state.stageTab === "deliverable") {
       state.deliverableLeftTab = "deliverables";
       state.selectedDeliverable = getDefaultDeliverable()?.id || "";
+    } else {
+      clearDemoPreview();
     }
+    render();
+    if (state.stageTab === "deliverable") void loadDemoPreviewContent();
+    return;
   }
   if (action === "left-tab") state.meetingLeftTab = target.dataset.tab;
   if (action === "deliverable-left-tab") {
@@ -4585,7 +5440,14 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
-  if (action === "select-deliverable") state.selectedDeliverable = target.dataset.id;
+  if (action === "select-deliverable") {
+    state.selectedDeliverable = target.dataset.id;
+    const selected = getSelectedDeliverable();
+    if (canonicalDeliverableKind(selected?.kind) !== "demo") clearDemoPreview();
+    render();
+    if (canonicalDeliverableKind(selected?.kind) === "demo") void loadDemoPreviewContent();
+    return;
+  }
   if (action === "download-current-deliverable") {
     await downloadCurrentDeliverable(target.dataset.id);
     return;
@@ -4641,6 +5503,10 @@ document.addEventListener("click", async (event) => {
   if (action === "refresh-deliverables") {
     await refreshDeliverables(state.selectedMeetingId);
     setToast("交付物状态已刷新");
+    return;
+  }
+  if (action === "retry-demo-preview") {
+    void loadDemoPreviewContent(state.selectedMeetingId, { force: true });
     return;
   }
   if (action === "open-followup") {
@@ -4740,6 +5606,11 @@ document.addEventListener("input", (event) => {
     scheduleKnowledgeSearch();
     return;
   }
+  if (event.target.matches(".template-search-input")) {
+    state.templateQuery = event.target.value;
+    scheduleIndustryTemplateSearch();
+    return;
+  }
   if (event.target.matches(".settings-api-key, .settings-endpoint")) {
     updateSettingsFromInputs();
     return;
@@ -4759,13 +5630,21 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.matches(".template-sort-select")) {
+    state.templateSort = event.target.value === "updated" ? "updated" : "default";
+    state.templatePage = 1;
+    await loadIndustryTemplates({ force: true });
+    return;
+  }
   if (event.target.matches(".demo-version-select")) {
     const version = Number(event.target.value);
     if (demoVersions.some((item) => item.version === version)) {
       state.selectedDemoVersion = version;
       state.demoVersionPinned = true;
     }
+    clearDemoPreview();
     render();
+    void loadDemoPreviewContent();
     return;
   }
   if (event.target.matches(".settings-model")) {
@@ -5076,6 +5955,8 @@ document.addEventListener("pointerup", () => {
 });
 
 window.addEventListener("resize", updateAnnotationViewport);
+
+window.addEventListener("pagehide", () => clearDemoPreview());
 
 window.addEventListener("popstate", () => {
   if (!webLandingEnabled) return;

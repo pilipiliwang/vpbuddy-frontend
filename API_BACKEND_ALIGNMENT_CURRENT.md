@@ -2,6 +2,16 @@
 
 审计日期：2026-07-13
 
+安全增量复核：2026-08-19
+
+## 0. 2026-08-19 Demo owner 鉴权增量
+
+- 前端已改用 `GET /api/meetings/{meeting_id}/demo/versions/{version}/content`，通过现有 Bearer 会话读取 HTML，再以临时 Blob URL 渲染不含 `allow-same-origin` 的沙箱 iframe。
+- 前端已取消 Web 运行时对公开 `/docs` 路径的代理，且不会在鉴权接口失败时回退。
+- 版本快速切换使用 AbortController 和请求序号隔离，旧响应不能覆盖新版本；切会、退出、离开预览或关闭页面时会释放 Blob URL。
+- 后端配合事项见 `aotocode2026/vpbuddy#12`：发布 owner 校验内容接口、统一 401/403/404、返回安全响应头，并在前端切换后删除公开 `/docs` 静态挂载。
+- 后端安全实现参考分支 commit `eb73a47`；在该接口部署到目标环境前，前端会显示明确的 404/加载失败状态，不会降级到不安全预览。
+
 ## 1. 审计范围与判定口径
 
 ### 1.1 事实源
@@ -346,3 +356,14 @@ ChatMessage 的真实字段是 `id, meeting_id, role, content, source, status, c
 - UI 实操通过：真实邮箱注册/登录、刷新恢复会话、创建会议、真实空状态、AI 设置读取与失败判定、结束会议、六类交付物返回、会议删除。
 - 自动化浏览器无法代替用户确认系统麦克风授权，因此 UI 以 15 秒超时回到“重试录制”；PCM/WS 协议由独立契约测试覆盖，客户端人工测试需在授权麦克风后复测真实声音。
 - 自动化浏览器不支持向原生文件选择控件注入本地文件；multipart 字段、Bearer、进度状态和成功后刷新逻辑已由代码与契约测试覆盖，客户端人工测试需各选择一个会议材料和一个 `.txt/.md/.pdf` 知识文档复测。
+
+## 16. 行业模板联调（2026-08-21）
+
+前端已按后端 Issue #14 的实际实现接入行业模板，不新增前端固定模板或 mock fallback：
+
+- 列表、搜索、行业筛选、排序和分页使用 `GET /api/templates`。
+- 详情使用 `GET /api/templates/{id}`；封面和 HTML 预览通过 Bearer 请求后转换为可回收 Blob URL。
+- 模板应用使用 `POST /api/templates/{id}/apply`，同时发送相同的 `Idempotency-Key` 与 `request_id`；网络失败后使用 `GET /api/templates/applications/{request_id}` 恢复结果，避免重复创建会议。
+- 应用成功后直接进入后端返回的会议，切换到交付物页并展示 Demo V1，不自动启动录音。
+
+联调环境 `http://47.100.182.3:28765` 已部署上述接口。对应后端实现提交为 `6f7e1601fae913a6cb70c0d509979f1a2cb6fea9`；截至本次核对，该提交尚未进入后端仓库默认主分支，正式重新部署前必须先合并该提交，否则模板入口会显示真实接口错误状态。

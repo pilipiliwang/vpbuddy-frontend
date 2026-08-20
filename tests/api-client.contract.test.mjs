@@ -25,6 +25,28 @@ function makeResponse(payload = { ok: true }) {
   };
 }
 
+function makeTextResponse(text, headers = { "content-type": "text/html; charset=utf-8" }) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => headers[String(name).toLowerCase()] || null },
+    async text() {
+      return text;
+    }
+  };
+}
+
+function makeBlobResponse(blob, headers = { "content-type": "image/svg+xml" }) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => headers[String(name).toLowerCase()] || null },
+    async blob() {
+      return blob;
+    }
+  };
+}
+
 function makeErrorResponse(status, payload = { error: "unauthorized" }) {
   return {
     ok: false,
@@ -200,6 +222,11 @@ test("protected API methods send the current Bearer JWT", async (t) => {
   const upload = new Blob(["contract"], { type: "text/plain" });
   const cases = [
     ["current user", (api) => requireMethod(api, "me")(), "GET", "/api/auth/me"],
+    ["template list", (api) => requireMethod(api, "listTemplates")(), "GET", "/api/templates", "?sort=default&page=1&page_size=20"],
+    ["template detail", (api) => requireMethod(api, "getTemplate")("data-dashboard"), "GET", "/api/templates/data-dashboard"],
+    ["template preview", (api) => requireMethod(api, "getTemplatePreview")("data-dashboard"), "GET", "/api/templates/data-dashboard/preview"],
+    ["template apply", (api) => requireMethod(api, "applyTemplate")("data-dashboard", { request_id: "request-7" }), "POST", "/api/templates/data-dashboard/apply"],
+    ["template application", (api) => requireMethod(api, "getTemplateApplication")("request-7"), "GET", "/api/templates/applications/request-7"],
     ["meeting list", (api) => requireMethod(api, "listMeetings")(), "GET", "/api/meetings"],
     ["meeting creation", (api) => requireMethod(api, "createMeeting")({ meetingId }), "POST", "/api/meetings/stream_start", `?meeting_id=${meetingId}`],
     ["meeting detail", (api) => requireMethod(api, "getMeeting")(meetingId), "GET", `/api/meetings/${meetingId}`],
@@ -215,6 +242,7 @@ test("protected API methods send the current Bearer JWT", async (t) => {
     ["chat history", (api) => requireMethod(api, "listChatHistory")(meetingId), "GET", `/api/meetings/${meetingId}/chat/history`],
     ["deliverables", (api) => requireMethod(api, "listDeliverables")(meetingId), "GET", `/api/meetings/${meetingId}/docs`],
     ["demo versions", (api) => requireMethod(api, "listDemoVersions")(meetingId), "GET", `/api/meetings/${meetingId}/demo/versions`],
+    ["demo version content", (api) => requireMethod(api, "getDemoVersionContent")(meetingId, 3), "GET", `/api/meetings/${meetingId}/demo/versions/3/content`],
     ["knowledge list", (api) => requireMethod(api, "listKnowledgeDocuments")(meetingId), "GET", "/api/kb/list", `?meeting_id=${meetingId}`],
     ["knowledge search", (api) => requireMethod(api, "searchKnowledge")({ q: "contract", meeting_id: meetingId }), "POST", "/api/kb/search"],
     ["knowledge upload", (api) => requireMethod(api, "uploadKnowledgeDocument")(upload, { meetingId }), "POST", "/api/kb/upload"],
@@ -232,6 +260,67 @@ test("protected API methods send the current Bearer JWT", async (t) => {
       assert.equal(headerValue(call.options.headers, "authorization"), `Bearer ${jwt}`);
     });
   }
+});
+
+test("industry template requests follow the deployed search, auth, preview, cover, and idempotency contract", async () => {
+  const calls = [];
+  const svg = new Blob(["<svg></svg>"], { type: "image/svg+xml" });
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => jwt,
+    timeoutMs: 0,
+    transport: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (new URL(url).pathname.endsWith("/preview")) return makeTextResponse("<!doctype html><title>Template</title>");
+      if (new URL(url).pathname.endsWith("/cover")) return makeBlobResponse(svg);
+      return makeResponse({ status: "success" });
+    }
+  });
+
+  await api.listTemplates({ q: "电商", industry: "电商零售", sort: "updated", page: 2, pageSize: 6 });
+  assertRequest(calls[0], "GET", "/api/templates", "?q=%E7%94%B5%E5%95%86&industry=%E7%94%B5%E5%95%86%E9%9B%B6%E5%94%AE&sort=updated&page=2&page_size=6");
+
+  assert.match(await api.getTemplatePreview("ecommerce-store"), /Template/);
+  assert.equal(headerValue(calls[1].options.headers, "accept"), "text/html");
+
+  const cover = await api.getTemplateCover("ecommerce-store");
+  assert.equal(cover.contentType, "image/svg+xml");
+  assert.equal(headerValue(calls[2].options.headers, "accept"), "image/*");
+
+  await api.applyTemplate("ecommerce-store", {
+    project_name: "新零售经营会",
+    request_id: "template-request-42"
+  });
+  assertRequest(calls[3], "POST", "/api/templates/ecommerce-store/apply");
+  assert.equal(headerValue(calls[3].options.headers, "idempotency-key"), "template-request-42");
+  assert.deepEqual(JSON.parse(calls[3].options.body), {
+    project_name: "新零售经营会",
+    request_id: "template-request-42"
+  });
+
+  for (const call of calls) {
+    assert.equal(headerValue(call.options.headers, "authorization"), `Bearer ${jwt}`);
+  }
+});
+
+test("Demo content is read as authenticated HTML instead of JSON", async () => {
+  const calls = [];
+  const html = "<!doctype html><title>Owner-only Demo</title>";
+  const api = createVpbuddyApi({
+    baseUrl: backendOrigin,
+    getToken: () => jwt,
+    timeoutMs: 0,
+    transport: async (url, options) => {
+      calls.push({ url, options });
+      return makeTextResponse(html);
+    }
+  });
+
+  assert.equal(await api.getDemoVersionContent(meetingId, 7), html);
+  assert.equal(calls.length, 1);
+  assertRequest(calls[0], "GET", `/api/meetings/${meetingId}/demo/versions/7/content`);
+  assert.equal(headerValue(calls[0].options.headers, "authorization"), `Bearer ${jwt}`);
+  assert.equal(headerValue(calls[0].options.headers, "accept"), "text/html");
 });
 
 test("multipart material, chat, and KB uploads preserve Bearer auth and backend fields", async () => {
@@ -310,6 +399,12 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "POST /api/auth/login",
     "GET /api/auth/me",
     "GET /api/meetings",
+    "GET /api/templates",
+    "GET /api/templates/:id",
+    "GET /api/templates/:id/preview",
+    "GET /api/templates/:id/cover",
+    "POST /api/templates/:id/apply",
+    "GET /api/templates/applications/:requestId",
     "POST /api/meetings/stream_start",
     "GET /api/meetings/:id",
     "GET /api/meetings/:id/state",
@@ -325,6 +420,7 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "GET /api/meetings/:id/docs/:kind",
     "GET /api/meetings/:id/docs/:kind/download",
     "GET /api/meetings/:id/demo/versions",
+    "GET /api/meetings/:id/demo/versions/:version/content",
     "GET /api/kb/list",
     "POST /api/kb/search",
     "POST /api/kb/upload",
@@ -345,6 +441,12 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "POST /api/auth/login",
     "GET /api/auth/me",
     "GET /api/client/device-status",
+    "GET /api/templates",
+    "GET /api/templates/:param",
+    "GET /api/templates/:param/preview",
+    "GET /api/templates/:param/cover",
+    "POST /api/templates/:param/apply",
+    "GET /api/templates/applications/:param",
     "GET /api/meetings",
     "GET /api/meetings/check_id",
     "POST /api/meetings/stream_start",
@@ -369,6 +471,7 @@ test("the endpoint registry documents only current canonical backend routes", ()
     "GET /api/meetings/:param/docs/:param",
     "GET /api/meetings/:param/docs/:param/download",
     "GET /api/meetings/:param/demo/versions",
+    "GET /api/meetings/:param/demo/versions/:param/content",
     "GET /api/kb/list",
     "GET /api/kb/search",
     "POST /api/kb/search",

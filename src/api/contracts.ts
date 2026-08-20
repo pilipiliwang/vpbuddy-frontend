@@ -22,6 +22,75 @@ export interface AuthUser {
   created_at: ISODateTime;
 }
 
+export type TemplateSort = "default" | "updated" | "updated_at";
+
+export interface IndustryTemplateSummary {
+  id: ID;
+  name: string;
+  industry: string;
+  scenario: string;
+  summary: string;
+  tags: string[];
+  featured: boolean;
+  sort_order: number;
+  updated_at: ISODateTime;
+  cover_url: string;
+  preview_url: string;
+}
+
+export interface IndustryTemplateDetail extends IndustryTemplateSummary {
+  roles: string[];
+  modules: string[];
+}
+
+export interface IndustryTemplateListRequest {
+  q?: string;
+  query?: string;
+  industry?: string;
+  sort?: TemplateSort;
+  page?: number;
+  page_size?: number;
+  pageSize?: number;
+}
+
+export interface IndustryTemplateListResponse {
+  templates: IndustryTemplateSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+  industries: string[];
+}
+
+export interface ApplyIndustryTemplateRequest {
+  project_name?: string;
+  projectName?: string;
+  meeting_id?: ID;
+  meetingId?: ID;
+  request_id: ID;
+  requestId?: ID;
+}
+
+export interface AppliedTemplateDemo {
+  status: "initialized" | string;
+  version: number;
+  preview_url: string;
+  download_url: string;
+}
+
+export interface ApplyIndustryTemplateResponse {
+  status: "success";
+  meeting_id: ID;
+  reused: boolean;
+  request_id?: ID;
+  template_id?: ID;
+  demo: AppliedTemplateDemo;
+}
+
+export interface IndustryTemplateApplication extends ApplyIndustryTemplateResponse {
+  user_id?: ID;
+  created_at?: ISODateTime;
+}
+
 export interface MeetingListItem {
   meeting_id: ID;
   owner_id: ID;
@@ -542,6 +611,12 @@ export type CurrentBackendRoute =
   | "POST /api/auth/login"
   | "GET /api/auth/me"
   | "GET /api/client/device-status"
+  | "GET /api/templates"
+  | "GET /api/templates/:id"
+  | "GET /api/templates/:id/preview"
+  | "GET /api/templates/:id/cover"
+  | "POST /api/templates/:id/apply"
+  | "GET /api/templates/applications/:requestId"
   | "GET /api/meetings"
   | "GET /api/meetings/check_id"
   | "POST /api/meetings/stream_start"
@@ -567,6 +642,7 @@ export type CurrentBackendRoute =
   | "GET /api/meetings/:id/docs/:kind"
   | "GET /api/meetings/:id/docs/:kind/download"
   | "GET /api/meetings/:id/demo/versions"
+  | "GET /api/meetings/:id/demo/versions/:version/content"
   | "GET /api/kb/list"
   | "POST /api/kb/search"
   | "POST /api/kb/upload"
@@ -590,6 +666,18 @@ export interface CurrentBackendApi {
     audio: { available: boolean; platform: string };
     recording: { active_meetings: number };
   }>;
+
+  listTemplates(input?: IndustryTemplateListRequest): Promise<IndustryTemplateListResponse>;
+  getTemplate(templateId: ID): Promise<IndustryTemplateDetail>;
+  getTemplateDetail(templateId: ID): Promise<IndustryTemplateDetail>;
+  getTemplatePreview(templateId: ID, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<string>;
+  getTemplateCover(templateId: ID, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<VpbuddyDownload>;
+  applyTemplate(
+    templateId: ID,
+    input: ApplyIndustryTemplateRequest,
+    options?: { idempotencyKey?: string; timeoutMs?: number }
+  ): Promise<ApplyIndustryTemplateResponse>;
+  getTemplateApplication(requestId: ID): Promise<IndustryTemplateApplication>;
 
   listMeetings(): Promise<MeetingListResponse>;
   checkMeetingId(id: ID): Promise<MeetingIdCheckResponse>;
@@ -635,6 +723,7 @@ export interface CurrentBackendApi {
   downloadDeliverable(meetingId: ID, kind: DocKind): Promise<VpbuddyDownload>;
   listDemoVersions(meetingId: ID): Promise<DemoVersionsResponse>;
   getDemoVersions(meetingId: ID): Promise<DemoVersionsResponse>;
+  getDemoVersionContent(meetingId: ID, version: number, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<string>;
 
   listKnowledge(input?: ID | { meeting_id?: ID; meetingId?: ID }): Promise<KnowledgeListResponse>;
   listKnowledgeDocuments(input?: ID | { meeting_id?: ID; meetingId?: ID }): Promise<KnowledgeListResponse>;

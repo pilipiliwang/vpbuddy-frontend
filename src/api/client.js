@@ -120,6 +120,13 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     return readJsonResponse(response);
   }
 
+  async function requestText(path, options = {}) {
+    const { response, auth, token } = await performRequest(path, options);
+    if (!response.ok) await throwResponseError(response, auth, token);
+    if (response.status === 204) return "";
+    return response.text();
+  }
+
   function responseFilename(response) {
     const disposition = response.headers?.get?.("content-disposition") || "";
     const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
@@ -177,6 +184,16 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     return withQuery("/api/kb/list", { meeting_id: meetingId });
   }
 
+  function templateListPath(input = {}) {
+    return withQuery("/api/templates", {
+      q: input.q ?? input.query,
+      industry: input.industry,
+      sort: input.sort ?? "default",
+      page: input.page ?? 1,
+      page_size: input.page_size ?? input.pageSize ?? 20
+    });
+  }
+
   function collabAsk(meetingId, sectionOrInput, question, asker = "agent") {
     const input = typeof sectionOrInput === "object" && sectionOrInput !== null
       ? sectionOrInput
@@ -208,6 +225,44 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     login: (input) => request("/api/auth/login", { method: "POST", body: JSON.stringify(input), auth: false }),
     me: () => request("/api/auth/me"),
     getDeviceStatus: () => request("/api/client/device-status"),
+
+    listTemplates: (input = {}) => request(templateListPath(input)),
+    getTemplate: (templateId) => request(`/api/templates/${encodeURIComponent(templateId)}`),
+    getTemplateDetail: (templateId) => request(`/api/templates/${encodeURIComponent(templateId)}`),
+    getTemplatePreview: (templateId, options = {}) => requestText(
+      `/api/templates/${encodeURIComponent(templateId)}/preview`,
+      {
+        ...options,
+        headers: { Accept: "text/html", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
+    getTemplateCover: (templateId, options = {}) => requestBlob(
+      `/api/templates/${encodeURIComponent(templateId)}/cover`,
+      {
+        ...options,
+        headers: { Accept: "image/*", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
+    applyTemplate: (templateId, input = {}, options = {}) => {
+      const requestId = input.request_id ?? input.requestId ?? options.idempotencyKey ?? "";
+      const payload = {
+        project_name: input.project_name ?? input.projectName ?? "",
+        request_id: requestId
+      };
+      const meetingId = input.meeting_id ?? input.meetingId;
+      if (meetingId) payload.meeting_id = meetingId;
+      return request(`/api/templates/${encodeURIComponent(templateId)}/apply`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: requestId ? { "Idempotency-Key": requestId } : {},
+        timeoutMs: options.timeoutMs ?? 120000
+      });
+    },
+    getTemplateApplication: (requestId) => request(
+      `/api/templates/applications/${encodeURIComponent(requestId)}`
+    ),
 
     listMeetings: () => request("/api/meetings"),
     checkMeetingId: (id) => request(withQuery("/api/meetings/check_id", { id })),
@@ -283,6 +338,14 @@ export function createVpbuddyApi({ baseUrl = "", getToken, onUnauthorized, onDia
     downloadDeliverable: (meetingId, kind) => requestBlob(`/api/meetings/${encodeURIComponent(meetingId)}/docs/${encodeURIComponent(kind)}/download`, { timeoutMs: 120000 }),
     listDemoVersions: (meetingId) => request(`/api/meetings/${encodeURIComponent(meetingId)}/demo/versions`),
     getDemoVersions: (meetingId) => request(`/api/meetings/${encodeURIComponent(meetingId)}/demo/versions`),
+    getDemoVersionContent: (meetingId, version, options = {}) => requestText(
+      `/api/meetings/${encodeURIComponent(meetingId)}/demo/versions/${encodeURIComponent(version)}/content`,
+      {
+        ...options,
+        headers: { Accept: "text/html", ...options.headers },
+        timeoutMs: options.timeoutMs ?? 120000
+      }
+    ),
 
     listKnowledge: (input) => request(knowledgeListPath(input)),
     listKnowledgeDocuments: (input) => request(knowledgeListPath(input)),
@@ -345,6 +408,14 @@ export const endpoints = {
   client: {
     deviceStatus: "GET /api/client/device-status"
   },
+  templates: {
+    list: "GET /api/templates",
+    detail: "GET /api/templates/:id",
+    preview: "GET /api/templates/:id/preview",
+    cover: "GET /api/templates/:id/cover",
+    apply: "POST /api/templates/:id/apply",
+    application: "GET /api/templates/applications/:requestId"
+  },
   meetings: {
     list: "GET /api/meetings",
     checkId: "GET /api/meetings/check_id",
@@ -379,7 +450,8 @@ export const endpoints = {
     list: "GET /api/meetings/:id/docs",
     detail: "GET /api/meetings/:id/docs/:kind",
     download: "GET /api/meetings/:id/docs/:kind/download",
-    demoVersions: "GET /api/meetings/:id/demo/versions"
+    demoVersions: "GET /api/meetings/:id/demo/versions",
+    demoContent: "GET /api/meetings/:id/demo/versions/:version/content"
   },
   knowledge: {
     list: "GET /api/kb/list",
